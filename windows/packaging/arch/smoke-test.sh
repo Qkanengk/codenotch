@@ -12,9 +12,11 @@ set -u
 
 out=${1:-$(mktemp -d)}
 mkdir -p "$out"
-export HOME=$out/home XDG_RUNTIME_DIR=$out/run
+# An empty home, as on a first run, in a folder of its own: the directory named
+# above only ever has files added to it.
+scratch=$(mktemp -d) || exit 1
+export HOME=$scratch/home XDG_RUNTIME_DIR=$scratch/run
 export XDG_CONFIG_HOME=$HOME/.config
-rm -rf "$HOME" "$XDG_RUNTIME_DIR"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 unset DISPLAY WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE
@@ -29,6 +31,7 @@ fail() {
   for f in "$log" "$out/codenotch.out" "$out/display.log"; do
     [ -s "$f" ] && { echo "--- $f" >&2; tail -n 40 "$f" >&2; }
   done
+  [ -s "$log" ] && cp "$log" "$out/run.log"
   exit 1
 }
 
@@ -46,6 +49,7 @@ wait_for() {
 cleanup() {
   [ ${#pids[@]} -eq 0 ] || kill "${pids[@]}" 2>/dev/null
   wait 2>/dev/null
+  rm -rf "$scratch"
 }
 trap cleanup EXIT
 
