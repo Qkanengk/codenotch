@@ -105,6 +105,54 @@ pub fn cursor_in_notch(x_size: (f64, f64)) -> Option<(f64, f64)> {
     cursor_in_notch_at(&socket(".socket.sock")?, std::process::id(), x_size)
 }
 
+/// An output as Hyprland lays it out. GDK's Wayland backend knows neither its connector name nor
+/// what the bars on it have taken, and the notch as a layer surface is placed by both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Output {
+    pub name: String,
+    /// Top-left corner in the layout, in logical pixels.
+    pub at: (i32, i32),
+    /// Logical pixels reserved on the left, top, right and bottom, by bars and by the config.
+    pub reserved: [i32; 4],
+}
+
+/// `j/monitors`, skipping anything that is not a whole output.
+fn parse_outputs(monitors: &str) -> Vec<Output> {
+    let Ok(serde_json::Value::Array(monitors)) = serde_json::from_str(monitors) else {
+        return Vec::new();
+    };
+    let int = |v: &serde_json::Value| v.as_f64().map(|n| n.round() as i32);
+    monitors
+        .iter()
+        .filter_map(|m| {
+            let reserved = m["reserved"].as_array().filter(|r| r.len() == 4)?;
+            Some(Output {
+                name: m["name"].as_str()?.to_string(),
+                at: (int(&m["x"])?, int(&m["y"])?),
+                reserved: [int(&reserved[0])?, int(&reserved[1])?, int(&reserved[2])?, int(&reserved[3])?],
+            })
+        })
+        .collect()
+}
+
+/// How long one answer serves: the notch asks about its screen from several threads a second.
+const OUTPUTS_FRESH: Duration = Duration::from_millis(500);
+
+/// The outputs of the running Hyprland; none when it cannot be asked.
+pub fn outputs() -> Vec<Output> {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, Vec<Output>)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some((_, outputs)) = last.as_ref().filter(|(at, _)| at.elapsed() < OUTPUTS_FRESH) {
+        return outputs.clone();
+    }
+    let outputs = socket(".socket.sock")
+        .and_then(|s| request(&s, "j/monitors").ok())
+        .map(|reply| parse_outputs(&reply))
+        .unwrap_or_default();
+    *last = Some((std::time::Instant::now(), outputs.clone()));
+    outputs
+}
+
 fn lua_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -165,6 +213,23 @@ pub fn disable_autostart() -> Result<bool, String> {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn outputs_are_read_with_their_place_and_reserved_edges() {
+        let monitors = r#"[
+            {"id": 0, "name": "DP-1", "width": 2560, "height": 1440, "x": 0, "y": 0, "reserved": [0, 40, 0, 0], "scale": 1.5},
+            {"id": 1, "name": "HDMI-A-1", "width": 1920, "height": 1080, "x": 1707, "y": -120, "reserved": [0, 0, 0, 0], "scale": 1.0},
+            {"id": 2, "name": "broken", "x": 0, "y": 0}
+        ]"#;
+        assert_eq!(
+            parse_outputs(monitors),
+            vec![
+                Output { name: "DP-1".into(), at: (0, 0), reserved: [0, 40, 0, 0] },
+                Output { name: "HDMI-A-1".into(), at: (1707, -120), reserved: [0, 0, 0, 0] },
+            ]
+        );
+        assert!(parse_outputs("unknown request").is_empty());
+    }
 
     /// A stand-in for Hyprland's command socket: answers each request with `reply` and reports it.
     fn fake_hyprland(reply: &'static str) -> (PathBuf, std::sync::mpsc::Receiver<String>) {

@@ -133,10 +133,7 @@ fn show(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), String> {
 /// so the card is drawn at the same size the notch itself currently is (Small/Medium/Large, per-monitor
 /// DPI, all already folded into the notch window's measured size).
 fn notch_geometry(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
-    let w = app.get_webview_window("notch")?;
-    let pos = w.outer_position().ok()?;
-    let size = w.outer_size().ok()?;
-    Some((pos.x, pos.y, size.width as i32, size.height as i32))
+    crate::notch_rect(&app.get_webview_window("notch")?)
 }
 
 fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), String> {
@@ -265,6 +262,15 @@ fn show_on_main(app: &AppHandle, event: ResetEvent, token: u64) -> Result<(), St
             (x.clamp(ax, ax + aw - width as i32), y.clamp(ay, ay + ah - height as i32))
         }
     };
+    #[cfg(target_os = "linux")]
+    if window.gtk_window().is_ok_and(|w| crate::layer_shell::install_card(&w)) {
+        let logical = |v: i32| (v as f64 / screen.scale.max(0.01)).round() as i32;
+        let to = crate::layer_shell::corner((logical(x - screen.x), logical(y - screen.y)));
+        let (origin, size) = ((logical(screen.x), logical(screen.y)), (logical(width as i32), logical(height as i32)));
+        if let Ok(w) = window.gtk_window() {
+            crate::layer_shell::place(&w, origin, size, &to);
+        }
+    }
     window
         .set_position(tauri::PhysicalPosition::new(x, y))
         .map_err(|e| e.to_string())?;

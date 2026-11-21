@@ -269,6 +269,13 @@ fn wait_for(flag: &AtomicU32, seq: u32, ms: u64) -> bool {
 /// pointer is followed here and its place on the border sent to the overlay, until the button comes up.
 #[tauri::command]
 pub fn begin_carry(app: AppHandle, shape: serde_json::Value) {
+    // The drawing is a window over the whole work area, which only X11 lets a client place, and
+    // nothing here can tell when the button is let go off Windows: the notch stays where it is.
+    #[cfg(target_os = "linux")]
+    if crate::layer_shell::active() {
+        let _ = (shape, app.emit_to("notch", "drag_end", true));
+        return;
+    }
     if crate::DRAGGING.swap(true, SeqCst) {
         return;
     }

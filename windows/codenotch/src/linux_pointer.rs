@@ -18,9 +18,13 @@ fn misses_for_leave() -> u32 {
 
 /// Hyprland keeps Xwayland's pointer where it last was once the cursor moves on to a Wayland
 /// window, so no leave event comes and the card would stay open. From an enter until the cursor is
-/// off the notch, Hyprland is asked where it is instead. Does nothing on any other desktop.
+/// off the notch, Hyprland is asked where it is instead. Does nothing on any other desktop, nor
+/// for the notch as a layer surface, which is told when the pointer leaves like any Wayland client.
 fn watch_for_leave_on_hyprland(window: &WebviewWindow) {
-    if crate::hyprland::cursor_in_notch((1.0, 1.0)).is_none() || WATCHING.swap(true, Ordering::SeqCst) {
+    if crate::layer_shell::active()
+        || crate::hyprland::cursor_in_notch((1.0, 1.0)).is_none()
+        || WATCHING.swap(true, Ordering::SeqCst)
+    {
         return;
     }
     let window = window.clone();
