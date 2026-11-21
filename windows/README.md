@@ -376,11 +376,15 @@ The binary can be started by itself, so `run-linux.sh` is only needed from a sna
   from Hyprland. The reset card is a layer surface too (`codenotch-card`); Settings is an ordinary
   Wayland window and the right-click menu a popup of the notch. `layerrule` lines in a Hyprland
   config can match either namespace.
-- **Dragging.** Its six dots (or Alt held anywhere on the notch) carry it along its edge, round
-  a corner onto another edge, or onto another monitor. The press is handed to Hyprland as a drag
-  that nothing accepts, since Hyprland stops telling a layer surface about a held button once the
-  pointer leaves it on an empty workspace; the cursor is Hyprland's own while it lasts. As the
-  XWayland window the notch cannot be dragged: the edge and the monitor are chosen in Settings.
+- **Dragging.** Its six dots carry it along its edge, round a corner onto another edge, or onto
+  another monitor, and it is put down where the pointer is when they are let go, whichever way
+  the pointer came: on the edge nearest the pointer, held where it was taken hold of. Dropped
+  nearer a corner than its window can go, it rests at that end of the edge. Alt held anywhere on
+  the notch does not carry it here, as it does on Windows: a layer surface that takes no keyboard
+  focus is never told that Alt is down. The press is handed to Hyprland as a drag that nothing
+  accepts, since Hyprland stops telling a layer surface about a held button once the pointer
+  leaves it on an empty workspace; the cursor is Hyprland's own while it lasts. As the XWayland
+  window the notch cannot be dragged: the edge and the monitor are chosen in Settings.
 - **Full screen.** While a window is full screen on the notch's monitor (`fullscreen`, not
   `fullscreen 1`, which keeps the bars), **Fold for full-screen apps** folds the notch to its pill
   and moves it into the room the bars have left, as on Windows. Hyprland is asked for its windows
@@ -390,7 +394,9 @@ The binary can be started by itself, so `run-linux.sh` is only needed from a sna
   that session runs in: the nearest ancestor of the `claude` process that owns a Hyprland window,
   on whichever workspace it is. A session with no terminal (Claude Desktop) focuses a window whose
   class contains `claude`. A session that has finished is cleared once that window is the active
-  one. A terminal inside tmux or reached over ssh has no such ancestor, and nothing happens.
+  one. A terminal inside tmux or reached over ssh has no such ancestor, and nothing happens. A
+  terminal that keeps all its windows in one process has one pid for all of them: the click goes
+  to the one of them used last, and any of them being active clears the finished sessions of all.
 
 The rest of this section is the XWayland window, and what both have in common:
 
@@ -436,9 +442,10 @@ per-account attempt floor or its rate-limit wait.
 ### Where the notch sits
 
 The notch pins to one edge of one screen. Six dots come out beside the settings button while the
-pointer is on it: hold them (or hold Alt anywhere on the notch) and drag, and the notch follows the
-pointer round the screen's border — along an edge, and round each corner — and lands where it is
-let go.
+pointer is on it: hold them (or, on Windows, hold Alt anywhere on the notch) and drag, and the notch
+follows the pointer round the screen's border — along an edge, and round each corner — and lands
+where it is let go: on the edge nearest the pointer, also when the pointer was taken straight
+across the screen rather than round by the corner.
 **Appearance → Edge** picks left, right, top or bottom: it stands upright on the left and right
 edges with the hover card opening sideways, and lies flat on the top and bottom ones with the card
 opening below or above. **Appearance → Screen** appears once more than one monitor is attached.
