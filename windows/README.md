@@ -351,8 +351,8 @@ What does not work yet, and degrades quietly rather than misbehaving:
 
 | Feature | Why |
 |---|---|
-| Dragging the pill along its edge | Follows the mouse through `GetAsyncKeyState`; needs an X11 pointer query. |
-| Seen-clears-it, and jumping back to the terminal | `focus.rs` reads the foreground window and the process tree through Toolhelp; `/proc` plus a window-manager call would replace it. |
+| Dragging the pill along its edge (works on Hyprland, below) | Follows the mouse through `GetAsyncKeyState`; needs an X11 pointer query. |
+| Seen-clears-it, jumping back to the terminal, and folding under a full-screen app (all three work on Hyprland, below) | The process tree is read from `/proc`, but which window is in front, which is full screen and how to raise one are asked of Hyprland; another desktop needs its own window-manager call. |
 | Antigravity | Its credential is read from the Windows Credential Manager; libsecret is the equivalent. |
 | App icons taken from an installed `.exe` | The built-in provider SVGs cover every provider, so little is lost. |
 
@@ -376,8 +376,21 @@ The binary can be started by itself, so `run-linux.sh` is only needed from a sna
   from Hyprland. The reset card is a layer surface too (`codenotch-card`); Settings is an ordinary
   Wayland window and the right-click menu a popup of the notch. `layerrule` lines in a Hyprland
   config can match either namespace.
-- **Not on a layer surface.** Dragging the notch along or between edges, which did not work
-  under XWayland either: the edge and the monitor are chosen in Settings.
+- **Dragging.** Its six dots (or Alt held anywhere on the notch) carry it along its edge, round
+  a corner onto another edge, or onto another monitor. The press is handed to Hyprland as a drag
+  that nothing accepts, since Hyprland stops telling a layer surface about a held button once the
+  pointer leaves it on an empty workspace; the cursor is Hyprland's own while it lasts. As the
+  XWayland window the notch cannot be dragged: the edge and the monitor are chosen in Settings.
+- **Full screen.** While a window is full screen on the notch's monitor (`fullscreen`, not
+  `fullscreen 1`, which keeps the bars), **Fold for full-screen apps** folds the notch to its pill
+  and moves it into the room the bars have left, as on Windows. Hyprland is asked for its windows
+  a few times a second; a full-screen window on another monitor, or on a workspace that is not
+  showing, changes nothing.
+- **Jumping to the terminal.** A click on a session's row in the Claude card focuses the window
+  that session runs in: the nearest ancestor of the `claude` process that owns a Hyprland window,
+  on whichever workspace it is. A session with no terminal (Claude Desktop) focuses a window whose
+  class contains `claude`. A session that has finished is cleared once that window is the active
+  one. A terminal inside tmux or reached over ssh has no such ancestor, and nothing happens.
 
 The rest of this section is the XWayland window, and what both have in common:
 
