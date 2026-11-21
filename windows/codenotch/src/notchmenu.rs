@@ -48,6 +48,10 @@ pub fn show_notch_menu(window: Window, provider: Option<String>) -> Result<(), S
     let menu = menu.separator().item(&keep_open).separator().item(&quit).build().map_err(err)?;
     #[cfg(windows)]
     let before = foreground();
+    #[cfg(target_os = "linux")]
+    if let Some((x, y)) = window.gtk_window().ok().and_then(|w| crate::layer_shell::pointer_in(&w)) {
+        return window.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y)).map_err(err);
+    }
     // Returns once the menu has closed
     window.popup_menu(&menu).map_err(err)?;
     #[cfg(windows)]

@@ -7,7 +7,7 @@ const FORCE_SHM: &str = "WEBKIT_DMABUF_RENDERER_FORCE_SHM";
 /// Set to keep the WebKit variables exactly as the environment has them.
 const KEEP_WEBKIT_ENV: &str = "CODENOTCH_KEEP_WEBKIT_ENV";
 
-fn truthy(value: Option<String>) -> bool {
+pub(crate) fn truthy(value: Option<String>) -> bool {
     value.is_some_and(|v| !v.is_empty() && v != "0")
 }
 
@@ -15,12 +15,18 @@ fn truthy(value: Option<String>) -> bool {
 ///
 /// * A Wayland client cannot place its own window, and the notch sits on a screen edge, so GDK is
 ///   pinned to X11 (XWayland). Hyprland's own docs suggest `GDK_BACKEND=wayland,x11,*` session-wide.
+///   The exception is the notch as a layer surface (`layer_shell`), which the compositor anchors
+///   to the edge itself and which only a Wayland client can have.
 /// * WebKitGTK 2.54 without its DMA-BUF renderer keeps only what was repainted in the last frame of
 ///   a transparent window: the ring spins on an otherwise empty notch (#489). That path is taken
 ///   when the renderer is switched off (a common session-wide NVIDIA workaround) and when the
 ///   driver cannot allocate GBM buffers. Shared-memory buffers keep the renderer and need no GBM.
-fn env_plan(get: impl Fn(&str) -> Option<String>, nvidia: bool) -> Vec<(&'static str, Option<&'static str>)> {
-    let mut plan = vec![("GDK_BACKEND", Some("x11"))];
+fn env_plan(
+    get: impl Fn(&str) -> Option<String>,
+    nvidia: bool,
+    layer_surface: bool,
+) -> Vec<(&'static str, Option<&'static str>)> {
+    let mut plan = vec![("GDK_BACKEND", Some(if layer_surface { "wayland" } else { "x11" }))];
     if truthy(get(KEEP_WEBKIT_ENV)) {
         return plan;
     }
@@ -55,7 +61,8 @@ fn init_xlib_threads() -> Result<(), String> {
 
 /// Call first thing in `main`, before any thread exists and before GTK is touched.
 pub fn prepare() {
-    for (key, value) in env_plan(|k| std::env::var(k).ok(), nvidia_driver_loaded()) {
+    let layer_surface = crate::layer_shell::wanted();
+    for (key, value) in env_plan(|k| std::env::var(k).ok(), nvidia_driver_loaded(), layer_surface) {
         match value {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
@@ -72,7 +79,17 @@ mod tests {
 
     fn plan(env: &[(&str, &str)], nvidia: bool) -> Vec<(&'static str, Option<&'static str>)> {
         let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        env_plan(|k| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()), nvidia)
+        env_plan(|k| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()), nvidia, false)
+    }
+
+    #[test]
+    fn a_layer_surface_needs_the_wayland_backend() {
+        assert_eq!(env_plan(|_| None, false, true), vec![("GDK_BACKEND", Some("wayland"))]);
+        assert_eq!(
+            env_plan(|_| None, true, true),
+            vec![("GDK_BACKEND", Some("wayland")), (FORCE_SHM, Some("1"))],
+            "the WebKit workaround is the same on either backend"
+        );
     }
 
     #[test]

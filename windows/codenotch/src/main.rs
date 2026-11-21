@@ -52,6 +52,8 @@ mod linux_pointer;
 mod linux_env;
 #[cfg(target_os = "linux")]
 mod hyprland;
+#[cfg(target_os = "linux")]
+mod layer_shell;
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
@@ -181,7 +183,30 @@ pub fn screens(app: &AppHandle) -> Vec<Screen> {
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    if layer_shell::active() {
+        let outputs = hyprland::outputs();
+        return out.into_iter().map(|s| as_hyprland_has_it(s, &outputs)).collect();
+    }
     out
+}
+
+/// A screen with the name and the work area Hyprland gives its output, found by where it is.
+///
+/// As a Wayland client GDK reports the monitor's model for a name, empty or the same for two
+/// alike, and the whole monitor for a work area, so the notch would sit under a bar on its edge.
+#[cfg(target_os = "linux")]
+fn as_hyprland_has_it(mut s: Screen, outputs: &[hyprland::Output]) -> Screen {
+    let scale = s.scale.max(0.01);
+    let logical = |v: i32| (v as f64 / scale).round() as i32;
+    let Some(output) = outputs.iter().find(|o| o.at == (logical(s.x), logical(s.y))) else {
+        return s;
+    };
+    let px = |v: i32| (v as f64 * scale).round() as i32;
+    let [left, top, right, bottom] = output.reserved.map(px);
+    s.name = Some(output.name.clone());
+    s.work = (s.x + left, s.y + top, s.w - left - right, s.h - top - bottom);
+    s
 }
 
 /// The monitor the notch should sit on: the configured one while it is still attached, else primary.
@@ -370,12 +395,12 @@ pub fn place_notch(app: &AppHandle) {
             c.along(&edge)
         };
         let (x, y) = edge_origin(&mon, &edge, ww, wh, ratio);
-        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        move_notch(&w, &mon, &edge, (x, y), (ww, wh));
         let mut placed = (x, y, ww, wh);
         if w.outer_size().map(|s| s.width != target.width).unwrap_or(false) {
             let _ = w.set_size(target);
             let (x, y) = edge_origin(&mon, &edge, target.width as i32, target.height as i32, ratio);
-            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+            move_notch(&w, &mon, &edge, (x, y), (target.width as i32, target.height as i32));
             placed = (x, y, target.width as i32, target.height as i32);
         }
         // The page mirrors itself for the edge it is on; it cannot know that on its own.
@@ -400,6 +425,49 @@ pub fn place_notch(app: &AppHandle) {
             mon.work
         ));
     }
+}
+
+/// Where `move_notch` last put a layer surface and how large, in physical pixels: Wayland tells no
+/// window where it is, and tao hears of no size for a surface that is not a toplevel.
+#[cfg(target_os = "linux")]
+static LAYER_AT: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
+
+/// Puts the notch's top-left corner at `at`, in the physical pixels `mon` is measured in.
+fn move_notch(w: &tauri::WebviewWindow, mon: &Screen, edge: &str, at: (i32, i32), size: (i32, i32)) {
+    #[cfg(target_os = "linux")]
+    if layer_shell::active() {
+        // A layer surface has no position: the compositor anchors it, in its own logical pixels
+        let logical = |v: i32| (v as f64 / mon.scale.max(0.01)).round() as i32;
+        let offset = (logical(at.0 - mon.x), logical(at.1 - mon.y));
+        let to = layer_shell::placement(
+            edge,
+            offset,
+            (logical(size.0), logical(size.1)),
+            (logical(mon.w), logical(mon.h)),
+        );
+        *LAYER_AT.lock().unwrap() = Some((at.0, at.1, size.0, size.1));
+        let (screen, size) = ((logical(mon.x), logical(mon.y)), (logical(size.0), logical(size.1)));
+        let window = w.clone();
+        // Placements come from worker threads too, and GTK is only for the main one
+        let _ = w.run_on_main_thread(move || {
+            if let Ok(window) = window.gtk_window() {
+                layer_shell::place(&window, screen, size, &to);
+            }
+        });
+        return;
+    }
+    let _ = (mon, edge, size);
+    let _ = w.set_position(tauri::PhysicalPosition::new(at.0, at.1));
+}
+
+/// The notch window's rectangle in physical pixels: x, y, width, height.
+pub(crate) fn notch_rect(w: &tauri::WebviewWindow) -> Option<(i32, i32, i32, i32)> {
+    #[cfg(target_os = "linux")]
+    if layer_shell::active() {
+        return *LAYER_AT.lock().unwrap();
+    }
+    let (at, size) = (w.outer_position().ok()?, w.outer_size().ok()?);
+    Some((at.x, at.y, size.width as i32, size.height as i32))
 }
 
 /// The window's measured size, or the size just asked for when there is nothing to measure: an X11
@@ -442,7 +510,7 @@ pub(crate) fn glide_notch(app: &AppHandle) {
         *g
     };
     let Some(w) = app.get_webview_window("notch") else { return };
-    let (Some(mon), Ok(from), Ok(size)) = (target_screen(app), w.outer_position(), w.outer_size()) else {
+    let (Some(mon), Some((fx, fy, width, height))) = (target_screen(app), notch_rect(&w)) else {
         place_notch(app);
         return;
     };
@@ -453,8 +521,8 @@ pub(crate) fn glide_notch(app: &AppHandle) {
         let ratio = c.along(&edge);
         (edge, ratio)
     };
-    let to = edge_origin(&mon, &edge, size.width as i32, size.height as i32, ratio);
-    if to == (from.x, from.y) {
+    let (from, to) = ((fx, fy), edge_origin(&mon, &edge, width, height, ratio));
+    if to == from {
         place_notch(app);
         return;
     }
@@ -462,14 +530,14 @@ pub(crate) fn glide_notch(app: &AppHandle) {
     loop {
         let t = (start.elapsed().as_secs_f64() * 1000.0 / GLIDE_MS).min(1.0);
         let k = glide_curve(t);
-        let x = from.x + ((to.0 - from.x) as f64 * k).round() as i32;
-        let y = from.y + ((to.1 - from.y) as f64 * k).round() as i32;
+        let x = from.0 + ((to.0 - from.0) as f64 * k).round() as i32;
+        let y = from.1 + ((to.1 - from.1) as f64 * k).round() as i32;
         {
             let g = GLIDE.lock().unwrap();
             if *g != gen || DRAGGING.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
-            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+            move_notch(&w, &mon, &edge, (x, y), (width, height));
         }
         if t >= 1.0 {
             break;
@@ -2265,8 +2333,11 @@ fn main() {
     let cfg = config::load();
     let port = cfg.port;
 
+    // A layer surface is no window to Hyprland, so there is nothing for a window rule to match
     #[cfg(target_os = "linux")]
-    hyprland::start();
+    if !layer_shell::wanted() {
+        hyprland::start();
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -2425,6 +2496,17 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            #[cfg(target_os = "linux")]
+            if layer_shell::wanted() {
+                // Before the first placement: a layer surface is placed by anchors, not by position
+                match handle.get_webview_window("notch").map(|w| w.gtk_window()) {
+                    Some(Ok(window)) => match layer_shell::install(&window) {
+                        Ok(()) => applog("hyprland: the notch is a layer surface"),
+                        Err(e) => applog(&format!("hyprland: the notch is an ordinary window ({e})")),
+                    },
+                    _ => applog("hyprland: the notch is an ordinary window (no GTK window)"),
+                }
+            }
             place_notch(&handle);
             // Before the notch is shown: a window shown on the system appearance and corrected
             // after paints the wrong one for a frame, which is a black flash under a light choice
@@ -2512,6 +2594,25 @@ mod tests {
         antigravity_composite_fraction, cursor_in_hot, glide_curve, notch_window_size, provider_page, ring_window,
         edge_origin, is_silent_launch, measured_or_target, work_insets, Screen, HOT_PAD, NOTCH_W, TRAY_PROVIDER_IDS,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wayland_screen_takes_its_name_and_work_area_from_hyprland() {
+        use super::{as_hyprland_has_it, hyprland::Output};
+        let outputs = [
+            Output { name: "DP-1".into(), at: (0, 0), reserved: [0, 40, 0, 0] },
+            Output { name: "HDMI-A-1".into(), at: (1280, 0), reserved: [0, 0, 0, 0] },
+        ];
+        // GDK scales a 1.5 output by 2: 2560 × 1440 of its pixels for 1280 × 720 logical ones
+        let gdk = Screen { name: Some(String::new()), x: 0, y: 0, w: 2560, h: 1440, scale: 2.0, work: (0, 0, 2560, 1440) };
+        let s = as_hyprland_has_it(gdk.clone(), &outputs);
+        assert_eq!(s.name.as_deref(), Some("DP-1"));
+        assert_eq!(s.work, (0, 80, 2560, 1360), "the bar's 40 logical pixels are 80 of GDK's");
+        let second = as_hyprland_has_it(Screen { x: 2560, work: (2560, 0, 2560, 1440), ..gdk.clone() }, &outputs);
+        assert_eq!((second.name.as_deref(), second.work), (Some("HDMI-A-1"), (2560, 0, 2560, 1440)));
+        let unknown = as_hyprland_has_it(Screen { x: 9000, ..gdk.clone() }, &outputs);
+        assert_eq!((unknown.name, unknown.work), (gdk.name, gdk.work), "left as GDK has it");
+    }
 
     #[test]
     fn an_unmeasured_window_is_placed_by_the_size_it_was_given() {

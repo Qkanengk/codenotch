@@ -512,6 +512,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "gtk",
+ "libloading",
  "native-tls",
  "notify",
  "png 0.17.16",

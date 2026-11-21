@@ -335,14 +335,12 @@ cargo build --release -p codenotch
 ./scripts/run-linux.sh doctor   # self-diagnosis, same as on Windows
 ```
 
-`scripts/run-linux.sh` exists because of two things the desktop does not do by itself.
 **Wayland does not let a client place its own windows**, and the notch has to sit on a
-screen edge, so it runs as an X11 client under XWayland. And a shell started from a
-**snap** — Ubuntu's VS Code, for one — exports that snap's library paths, which make a
-binary built against the system glibc die with
-`symbol lookup error: … undefined symbol: __libc_pthread_init`. The script unsets those
-and sets `GDK_BACKEND=x11`; launched from the desktop rather than such a shell, the
-binary runs on its own.
+screen edge, so it runs as an X11 client under XWayland; the binary picks that backend itself.
+`scripts/run-linux.sh` exists because a shell started from a **snap** — Ubuntu's VS Code, for
+one — exports that snap's library paths, which make a binary built against the system glibc die
+with `symbol lookup error: … undefined symbol: __libc_pthread_init`. The script unsets those;
+launched from the desktop rather than such a shell, the binary runs on its own.
 
 The tray needs GNOME's *AppIndicator Support* extension, as every Tauri tray does there.
 The data folder follows the XDG directories (`~/.config/codenotch`), and providers are
@@ -364,13 +362,26 @@ on Windows.
 
 #### Hyprland
 
-On Hyprland the notch is still an X11 client under XWayland; a native layer surface is not there
-yet. On Arch or CachyOS the prerequisites are
-`sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg openssl xorg-xwayland`.
-The binary can be started by itself — it picks X11 and calls `XInitThreads()` before GTK starts, so
-`run-linux.sh` is only needed from a snap's shell.
+On Hyprland the notch is a native Wayland layer surface (`wlr-layer-shell`, namespace `codenotch`,
+overlay layer): Hyprland anchors it to the screen edge itself, on every workspace, with no window
+rule, and draws it at the monitor's own scale, fractional ones included. On Arch or CachyOS the
+prerequisites are
+`sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3 gtk-layer-shell libayatana-appindicator librsvg openssl xorg-xwayland`.
+The binary can be started by itself, so `run-linux.sh` is only needed from a snap's shell.
 
-- **Window rule.** At launch the notch asks Hyprland, over its socket, to treat it as what it is:
+- **Layer surface.** `gtk-layer-shell` is loaded when the notch starts, not linked: with
+  `libgtk-layer-shell.so.0` missing, or with `CODENOTCH_XWAYLAND=1` set, the notch is the XWayland
+  window described below instead, and `run.log` says which of the two it is. The notch takes no
+  keyboard focus and reserves no room; it keeps clear of the room a bar reserves, which it reads
+  from Hyprland. The reset card is a layer surface too (`codenotch-card`); Settings is an ordinary
+  Wayland window and the right-click menu a popup of the notch. `layerrule` lines in a Hyprland
+  config can match either namespace.
+- **Not on a layer surface.** Dragging the notch along or between edges, which did not work
+  under XWayland either: the edge and the monitor are chosen in Settings.
+
+The rest of this section is the XWayland window, and what both have in common:
+
+- **Window rule (XWayland only).** At launch the notch asks Hyprland, over its socket, to treat it as what it is:
   floating, pinned to every workspace, no border, rounding, blur, shadow, dimming or animation, and
   not focused when it opens. The rule is set again after every config reload, and matches only the
   notch and its overlays, so Settings stays an ordinary window. This needs a Hyprland with a Lua
@@ -382,7 +393,7 @@ The binary can be started by itself — it picks X11 and calls `XInitThreads()` 
   it on (Settings, or `codenotch autostart on`) also adds one line ending in
   `-- codenotch autostart` at the top of `~/.config/hypr/hyprland.lua`, and turning it off removes that line.
   A config that is not there is not created.
-- **Hover.** Hyprland leaves Xwayland's pointer where it was once the cursor moves on to a Wayland
+- **Hover (XWayland only).** Hyprland leaves Xwayland's pointer where it was once the cursor moves on to a Wayland
   window, so no X11 leave event arrives; while the pointer is on the notch, Hyprland is asked where
   the cursor is, and the card closes on that. With the default `follow_mouse`, the notch is the
   active window while the pointer is on it, as any window would be.
@@ -392,8 +403,10 @@ The binary can be started by itself — it picks X11 and calls `XInitThreads()` 
   instead, and does the same whenever the NVIDIA kernel driver is loaded. Nothing forces Mesa.
   `CODENOTCH_KEEP_WEBKIT_ENV=1` leaves the environment exactly as it was given.
 
-This was tested on Hyprland 0.57 with XWayland 24.1 and WebKitGTK 2.54 on a virtual display with
-software rendering. It has not been run on an NVIDIA GPU or on a monitor with fractional scaling.
+This was tested on Hyprland 0.57 with gtk-layer-shell 0.10, XWayland 24.1 and WebKitGTK 2.54 on
+virtual displays with software rendering, at scales 1, 1.25 and 1.5 and with a second monitor. It
+has not been run on an NVIDIA GPU: if the layer surface misbehaves there, `CODENOTCH_XWAYLAND=1`
+is the way back.
 
 Tray menu: the readings themselves — a line per provider with its headline figure, and under it
 one line per limit window — then **Refresh all**, **Settings…** and **Quit Codenotch**. Clicking a
