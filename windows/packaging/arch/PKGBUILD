@@ -1,0 +1,70 @@
+# Maintainer: Khanh Nguyen Kim Quoc <khanhnguyenkim30825@gmail.com>
+#
+# Builds the checkout this file sits in rather than a download, so a branch can
+# be installed before it is merged:
+#
+#   cd windows/packaging/arch && makepkg -si
+
+_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
+_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$_root/windows/codenotch/Cargo.toml" | head -n1)
+# Set here, not in pkgver(): makepkg writes what that returns back into this
+# file, and the checkout would be dirty after every build.
+_rev=$(git -C "$_root" rev-list --count HEAD 2>/dev/null) &&
+  _rev=.r$_rev.g$(git -C "$_root" rev-parse --short=7 HEAD)
+
+pkgname=codenotch-git
+pkgver=$_version$_rev
+pkgrel=1
+pkgdesc='Usage notch for Claude, Codex, Cursor and other coding agents'
+arch=(x86_64 aarch64)
+url='https://github.com/Qkanengk/codenotch'
+license=(MIT)
+# gtk-layer-shell is opened at run time, so nothing links it: without it the
+# notch on Hyprland is an XWayland window instead of a layer surface.
+depends=(webkit2gtk-4.1 gtk3 gtk-layer-shell libayatana-appindicator openssl
+         xdg-utils hicolor-icon-theme)
+makedepends=(cargo)
+optdepends=('xorg-xwayland: the notch on a Wayland compositor other than Hyprland'
+            'nodejs: Qoder usage, through its SDK')
+provides=(codenotch)
+conflicts=(codenotch)
+# makepkg's LTO flags reach the C that ring and SQLite compile, as GCC bitcode
+# the Rust linker cannot read: the link then fails on every sqlite3_ symbol.
+# The release profile strips the binaries, so a debug package would be empty.
+options=(!lto !debug)
+
+prepare() {
+  cd "$_root/windows"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$_root/windows"
+  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$srcdir/target"
+  # custom-protocol is what `tauri build` passes: the pages come from the binary.
+  cargo build --frozen --release -p codenotch --features tauri/custom-protocol
+  cargo build --frozen --release -p codenotch-hook
+}
+
+check() {
+  cd "$_root/windows"
+  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --frozen
+}
+
+package() {
+  cd "$_root/windows"
+  # The hook beside the app: that is where Install hooks looks for it.
+  install -Dm755 -t "$pkgdir/usr/bin" \
+    "$srcdir/target/release/codenotch" "$srcdir/target/release/codenotch-hook"
+  install -Dm644 -t "$pkgdir/usr/share/applications" packaging/arch/codenotch.desktop
+  install -Dm644 codenotch/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/codenotch.png"
+  install -Dm644 codenotch/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/codenotch.png"
+  install -Dm644 codenotch/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/codenotch.png"
+  install -Dm644 codenotch/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/codenotch.png"
+  # Qoder's sidecar wants node_modules beside it, so it is copied from here
+  # into ~/.config/codenotch/qoder-sdk rather than run in place.
+  install -Dm644 -t "$pkgdir/usr/share/codenotch" codenotch/qoder-usage.cjs
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE
+}
