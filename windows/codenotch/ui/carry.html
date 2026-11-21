@@ -260,8 +260,6 @@ function buildCells(){
 /* How much it stretches with speed: dragged fast it draws out along the way it is going and thins,
    its back end trailing, and takes its own shape again as it slows (NotchWindowController). */
 const MAX_STRETCH = .14, STRETCH_SPEED = 2600;
-/* The corner the drawing was last going round, for a let-go mid-corner to flow off. */
-let passing = null;
 
 function draw(hand){
   const stretch = still ? 0 : MAX_STRETCH * Math.min(1, Math.abs(velocity) / STRETCH_SPEED);
@@ -273,7 +271,6 @@ function draw(hand){
   const thin = 1 - stretch * .35;
   const [first, second] = round ? EDGES_OF[round.corner] : [placeAt(p)[0], placeAt(p)[0]];
   const from = dims(first), to = dims(second);
-  passing = round;
   if(!round){
     const a = placeAt(p - length / 2 + .001)[1], b = placeAt(p + length / 2 - .001)[1];
     const d = notchPath(first, Math.min(a, b), Math.max(a, b), from.depth * thin, st.shape.radius * st.size, st.shape.fillet * st.size);
@@ -424,15 +421,19 @@ function resting(p){
 }
 
 /* Let go round a corner, it flows off it: on along the border, on the same glide it followed the
-   hand with, to where the whole of it is on whichever edge more of it was already on, straightening
-   as it goes. Pulled onto the edge in one frame, it snapped from the bend to its resting shape. */
+   hand with, to where the whole of it is on whichever edge more of it is on, straightening as it
+   goes. Pulled onto the edge in one frame, it snapped from the bend to its resting shape.
+   The corner is the one the hand is at, not the one the drawing is going round: the drawing comes
+   after the hand, and let go while it was still rounding a corner the hand had long left, it went
+   back to the edge it had come from. */
 function letGo(){
   let place = target;
-  if(passing){
-    const [first, second] = EDGES_OF[passing.corner];
-    const onto = passing.before >= passing.after ? first : second;
+  const round = shapeAt(target, 0).round;
+  if(round){
+    const [first, second] = EDGES_OF[round.corner];
+    const onto = round.before >= round.after ? first : second;
     const half = dims(onto).length / 2 + 1;
-    place = wrap(onto === first ? cornerAt(passing.corner) - half : cornerAt(passing.corner) + half);
+    place = wrap(onto === first ? cornerAt(round.corner) - half : cornerAt(round.corner) + half);
   }
   target = resting(place);
   settling = true;
@@ -460,7 +461,7 @@ function start(init){
   if(!init) return;
   st = init;
   shown = target = init.place;
-  velocity = 0; lastTick = null; settling = false; passing = null; releasedAt = null;
+  velocity = 0; lastTick = null; settling = false; releasedAt = null;
   buildCells();
   draw(shown);
   if(!ticking){ ticking = true; requestAnimationFrame(tick); }

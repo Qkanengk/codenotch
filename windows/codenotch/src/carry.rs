@@ -195,6 +195,30 @@ pub fn place(x: f64, y: f64, track: &BorderTrack, reading: Reading) -> f64 {
     }
 }
 
+/// The notch in the hand: the edge the pointer was last read from, and how far along the border the
+/// notch's middle is from the pointer, as it was taken hold of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hold {
+    pub edge: Edge,
+    pub grip: f64,
+}
+
+impl Hold {
+    /// A notch on `from` with its middle at `middle`, taken hold of at (x, y).
+    pub fn take(from: Edge, middle: f64, x: f64, y: f64, track: &BorderTrack) -> Hold {
+        Hold { edge: from, grip: track.signed(middle - place(x, y, track, reading(x, y, track, from))) }
+    }
+
+    /// Where the notch's middle goes for a pointer at (x, y): the pointer's own place on the border,
+    /// held where it was taken hold of. Nothing of the way the pointer came is kept: a pointer taken
+    /// straight across the screen changes edge far from any corner, and a notch that kept its place
+    /// through that change stayed that far from the pointer and was put down that far from it.
+    pub fn target(&mut self, x: f64, y: f64, track: &BorderTrack) -> f64 {
+        self.edge = sticky_edge(self.edge, x, y, track);
+        track.wrapped(place(x, y, track, reading(x, y, track, self.edge)) + self.grip)
+    }
+}
+
 // ---------------- the carry ----------------
 
 pub const LABEL: &str = "carry";
@@ -384,9 +408,7 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
     let (mx, my) = local(&mon, nx as f64 + nw as f64 / 2.0, ny as f64 + nh as f64 / 2.0);
     let middle = track.position_on(from, mx, my);
     let (px, py) = at(&mon, cur);
-    let mut pointer_edge = from;
-    let mut read = reading(px, py, &track, from);
-    let mut grip = track.signed(middle - place(px, py, &track, read));
+    let mut hold = Hold::take(from, middle, px, py, &track);
 
     let seq = SEQ.fetch_add(1, SeqCst) + 1;
     *LANDED.lock().unwrap() = None;
@@ -409,7 +431,11 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
 
     let all = crate::screens(app);
     let mut last = middle;
-    while held(app) {
+    // Once more after it is let go: the pointer may have moved since it was last read, and the notch
+    // is put down where the pointer is then
+    let mut going = true;
+    while going {
+        going = held(app);
         if let Some(cur) = pointer(app) {
             if let Some(s) = cur.over(&all).filter(|s| !crate::same_screen(s, &mon) && cur.depth(&mon, s) >= CROSS) {
                 // Onto another screen: there is no border between the two to travel, so it arrives
@@ -417,10 +443,8 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
                 mon = s.clone();
                 track = track_of(&mon);
                 let (px, py) = at(&mon, cur);
-                pointer_edge = sticky_edge(pointer_edge, px, py, &track);
-                read = reading(px, py, &track, pointer_edge);
-                grip = 0.0;
-                last = place(px, py, &track, read);
+                hold.grip = 0.0;
+                last = hold.target(px, py, &track);
                 if let Some(init) = CURRENT.lock().unwrap().as_mut() {
                     (init.w, init.h, init.place, init.reach) = (track.width, track.height, last, reach_on(&mon, size));
                 }
@@ -428,21 +452,15 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
                 continue;
             }
             let (px, py) = at(&mon, cur);
-            let edge = sticky_edge(pointer_edge, px, py, &track);
-            let now = reading(px, py, &track, edge);
-            // A new way of reading the pointer's place moves that place, so the grip takes it up
-            if now != read {
-                grip += track.signed(place(px, py, &track, read) - place(px, py, &track, now));
-                read = now;
-            }
-            pointer_edge = edge;
-            let target = track.wrapped(place(px, py, &track, read) + grip);
+            let target = hold.target(px, py, &track);
             if (target - last).abs() > 0.01 {
                 last = target;
                 let _ = app.emit_to(LABEL, "carry_target", target);
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(8));
+        if going {
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
     }
 
     // Let go: the drawing comes to rest on its own and says where
@@ -772,5 +790,91 @@ mod tests {
         let p = TRACK.perimeter();
         assert!((TRACK.signed(p - 10.0) + 10.0).abs() < 0.001, "just behind the start is a step back");
         assert!((TRACK.signed(10.0) - 10.0).abs() < 0.001);
+    }
+
+    /// The pointer walked from one point to the next in `steps`, as the carry reads it; where the
+    /// notch's middle is at the end.
+    fn walked(hold: &mut Hold, from: (f64, f64), to: (f64, f64), steps: u32) -> f64 {
+        let mut target = 0.0;
+        for i in 0..=steps {
+            let t = f64::from(i) / f64::from(steps);
+            target = hold.target(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, &TRACK);
+        }
+        target
+    }
+
+    #[test]
+    fn taken_hold_of_it_stays_where_it_is() {
+        let middle = TRACK.position_on(Edge::Right, 1800.0, 500.0);
+        let mut hold = Hold::take(Edge::Right, middle, 1770.0, 630.0, &TRACK);
+        assert_eq!(hold.grip, -130.0, "held 130 further round than its middle");
+        assert!((hold.target(1770.0, 630.0, &TRACK) - middle).abs() < 0.001);
+    }
+
+    #[test]
+    fn taken_straight_across_the_screen_it_is_put_down_under_the_pointer() {
+        // From the right edge to the top, nowhere near the corner between them. It used to keep
+        // its place through the change of edge, and landed at the far end of the top.
+        let middle = TRACK.position_on(Edge::Right, 1800.0, 500.0);
+        for steps in [1, 12, 400] {
+            let mut hold = Hold::take(Edge::Right, middle, 1770.0, 630.0, &TRACK);
+            let rest = walked(&mut hold, (1770.0, 630.0), (900.0, 30.0), steps);
+            assert_eq!(TRACK.place_at(rest), (Edge::Top, 900.0 - 130.0), "in {steps} steps");
+        }
+    }
+
+    #[test]
+    fn it_is_put_down_under_the_pointer_whichever_way_it_came() {
+        let middle = TRACK.position_on(Edge::Right, 1800.0, 500.0);
+        let drop = (900.0, 30.0);
+        let ways: [&[(f64, f64)]; 4] = [
+            &[],
+            // Up the right edge and round by the corner
+            &[(1790.0, 20.0), (1700.0, 10.0)],
+            // Out into the middle of the screen and back
+            &[(900.0, 600.0)],
+            // The long way: down, along the bottom, up the left
+            &[(1780.0, 1150.0), (20.0, 1150.0), (20.0, 20.0)],
+        ];
+        for way in ways {
+            let mut hold = Hold::take(Edge::Right, middle, 1770.0, 630.0, &TRACK);
+            let mut at = (1770.0, 630.0);
+            for next in way.iter().copied().chain([drop]) {
+                walked(&mut hold, at, next, 60);
+                at = next;
+            }
+            assert_eq!(TRACK.place_at(hold.target(drop.0, drop.1, &TRACK)), (Edge::Top, 770.0), "by way of {way:?}");
+        }
+    }
+
+    #[test]
+    fn carried_again_and_again_it_is_always_put_down_by_the_pointer() {
+        // Every drop on a grid over the screen, each carry begun where the last one ended
+        let mut middle = TRACK.position_on(Edge::Right, 1800.0, 500.0);
+        let mut at = (1770.0, 500.0);
+        let mut edge = Edge::Right;
+        for i in 0..200u32 {
+            let drop = (f64::from((i * 617) % 1800), f64::from((i * 389) % 1169));
+            let mut hold = Hold::take(edge, middle, at.0, at.1, &TRACK);
+            let grip = hold.grip.abs();
+            let rest = walked(&mut hold, at, drop, 25);
+            let nearest = Edge::ALL
+                .into_iter()
+                .map(|e| distance_from(e, drop.0, drop.1, &TRACK))
+                .fold(f64::INFINITY, f64::min);
+            let (on, along) = TRACK.place_at(rest);
+            let (x, y) = match on {
+                Edge::Top => (along, 0.0),
+                Edge::Bottom => (along, TRACK.height),
+                Edge::Left => (0.0, along),
+                Edge::Right => (TRACK.width, along),
+            };
+            let away = (x - drop.0).abs().max((y - drop.1).abs());
+            // On the border as near the pointer as the border gets, give or take where it was held,
+            // the margin an edge is kept by and the corner's own reading
+            assert!(away <= nearest + grip + EDGE_SWITCH_MARGIN + CORNER_REACH, "drop {i} at {drop:?}: put down at {on:?} {along}, {away} away");
+            (middle, edge) = (rest, on);
+            at = (x.clamp(1.0, TRACK.width - 1.0), y.clamp(1.0, TRACK.height - 1.0));
+        }
     }
 }

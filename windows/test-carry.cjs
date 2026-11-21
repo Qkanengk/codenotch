@@ -118,13 +118,26 @@ test('the rings go round a corner on a curve, never a step', () => {
   }
 });
 
-test('let go round a corner, it flows off onto the edge more of it was on, and rests there', () => {
+test('let go round a corner, it flows off onto the edge more of it is on, and rests there', () => {
   const run = page();
-  run(`passing = { corner: 'topRight', before: 150, after: 50 }; target = 1800; letGo();`);
+  // Its middle 60 short of the top-right corner (at 1800): most of it still on the top
+  run(`target = 1740; letGo();`);
   assert.deepEqual(JSON.parse(run('JSON.stringify(placeAt(target))')), ['top', 1800 - 325]);
-  run(`passing = { corner: 'topRight', before: 40, after: 160 }; target = 1800; letGo();`);
+  // Its middle 60 past the corner: most of it down the right edge
+  run(`target = 1860; letGo();`);
   assert.deepEqual(JSON.parse(run('JSON.stringify(placeAt(target))')), ['right', 325]);
   assert.equal(run('settling'), true);
+});
+
+test('let go, it rests where the hand is, wherever the drawing has got to', () => {
+  const run = page();
+  // The hand is well along the top; the drawing, coming after it, is still rounding the corner it
+  // left the right edge by. It used to go back to the right edge.
+  run(`shown = 1830; draw(shown); target = 1000; letGo();`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(placeAt(target))')), ['top', 1000]);
+  // And the other way: the hand is down the right edge, the drawing still on the top
+  run(`shown = 1700; draw(shown); target = 1800 + 600; letGo();`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(placeAt(target))')), ['right', 600]);
 });
 
 test('a part in the corner closes up square as the notch goes round, and not before', () => {
