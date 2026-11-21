@@ -83,23 +83,34 @@ pub fn is_enabled() -> bool {
 }
 
 #[cfg(not(windows))]
+fn desktop_entry(exe: &std::path::Path) -> String {
+    format!(
+        "[Desktop Entry]\nType=Application\nName=Codenotch\nExec=\"{}\" --silent\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+        exe.display()
+    )
+}
+
+#[cfg(not(windows))]
 pub fn enable() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let path = desktop_entry_path().ok_or("no XDG config directory")?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Codenotch\nExec=\"{}\" --silent\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-        exe.display()
-    );
-    std::fs::write(&path, entry).map_err(|e| e.to_string())?;
+    std::fs::write(&path, desktop_entry(&exe)).map_err(|e| e.to_string())?;
+    // Hyprland starts nothing from the XDG directory unless a session manager does it for it.
+    #[cfg(target_os = "linux")]
+    if crate::hyprland::enable_autostart(&exe)? {
+        return Ok("start at sign-in enabled (desktop entry and hyprland.lua; silent until a session appears)".into());
+    }
     Ok("start at sign-in enabled (silent until a session appears)".into())
 }
 
 #[cfg(not(windows))]
 pub fn disable() -> Result<String, String> {
     let path = desktop_entry_path().ok_or("no XDG config directory")?;
+    #[cfg(target_os = "linux")]
+    crate::hyprland::disable_autostart()?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok("start at sign-in disabled".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("start at sign-in was not enabled".into()),

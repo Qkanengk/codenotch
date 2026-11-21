@@ -15,6 +15,9 @@ const WIRING: &[(&str, bool, &str)] = &[
     ("SessionEnd", false, "session_end"),
 ];
 
+/// The hook client, built beside the app: only Windows puts `.exe` on it.
+const HOOK_FILE: &str = if cfg!(windows) { "codenotch-hook.exe" } else { "codenotch-hook" };
+
 fn settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
@@ -68,7 +71,7 @@ pub fn install() -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .parent()
         .ok_or("cannot locate the program directory")?
-        .join("codenotch-hook.exe");
+        .join(HOOK_FILE);
     if !hook_exe.exists() {
         return Err(format!("missing {}", hook_exe.display()));
     }
@@ -119,4 +122,20 @@ pub fn uninstall() -> Result<String, String> {
     }
     backup_and_write(&path, &root)?;
     Ok(format!("removed {removed} Codenotch hook(s)"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hook_is_looked_for_under_the_name_the_platform_builds() {
+        assert_eq!(HOOK_FILE, format!("codenotch-hook{}", std::env::consts::EXE_SUFFIX));
+    }
+
+    #[test]
+    fn our_entries_are_told_from_the_users_own() {
+        assert!(is_ours(&json!({ "hooks": [{ "type": "command", "command": "\"/opt/codenotch/codenotch-hook\" running" }] })));
+        assert!(!is_ours(&json!({ "hooks": [{ "type": "command", "command": "notify-send done" }] })));
+    }
 }

@@ -224,17 +224,27 @@ pub fn open_update_installer() -> Result<(), String> {
             .ok_or("No Windows update is available")?
     };
     let version = Version::parse(&version).map_err(|e| e.to_string())?;
-    let url = format!(
-        "https://github.com/vinzdg/codenotch/releases/download/v{version}/{INSTALLER_NAME}"
-    );
-    let mut command = std::process::Command::new("cmd");
-    command.args(["/C", "start", "", &url]);
+    let (program, args) = manual_update_command(&version);
+    let mut command = std::process::Command::new(program);
+    command.args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     command.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// What a click on the manual update button runs: the installer download on Windows, and the
+/// release page everywhere else, where no release carries an installer.
+fn manual_update_command(version: &Version) -> (&'static str, Vec<String>) {
+    let releases = "https://github.com/vinzdg/codenotch/releases";
+    if cfg!(windows) {
+        let url = format!("{releases}/download/v{version}/{INSTALLER_NAME}");
+        ("cmd", vec!["/C".into(), "start".into(), String::new(), url])
+    } else {
+        ("xdg-open", vec![format!("{releases}/tag/v{version}")])
+    }
 }
 
 /// Install only an offer previously found in a signed Tauri feed.
@@ -319,7 +329,7 @@ pub fn check_on_launch(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{newer_signed_release, newer_windows_release, signed_offer_matches};
+    use super::{manual_update_command, newer_signed_release, newer_windows_release, signed_offer_matches};
     use semver::Version;
 
     fn release(tag: &str, windows: bool) -> String {
@@ -365,5 +375,17 @@ mod tests {
             newer_signed_release("1.18.0", &Version::parse("1.18.0").unwrap()),
             None
         );
+    }
+
+    #[test]
+    fn a_manual_update_opens_what_the_platform_can_use() {
+        let (program, args) = manual_update_command(&Version::new(1, 30, 0));
+        if cfg!(windows) {
+            assert_eq!(program, "cmd");
+            assert_eq!(args.last().unwrap(), "https://github.com/vinzdg/codenotch/releases/download/v1.30.0/Codenotch-Setup.exe");
+        } else {
+            assert_eq!(program, "xdg-open");
+            assert_eq!(args, ["https://github.com/vinzdg/codenotch/releases/tag/v1.30.0"]);
+        }
     }
 }

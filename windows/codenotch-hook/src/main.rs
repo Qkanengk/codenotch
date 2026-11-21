@@ -5,6 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const DEFAULT_PORT: u16 = 48666;
@@ -25,37 +26,46 @@ fn main() {
     let _ = send(port, &token, &event, ppid, &body);
 }
 
-/// Pulls auth token out of %APPDATA%\codenotch\auth_token (hand-rolled scan, no dependency)
-fn read_token() -> String {
-    let path = match std::env::var("APPDATA") {
-        Ok(a) => format!("{a}\\codenotch\\auth_token"),
-        Err(_) => return String::new(),
+/// Where the app keeps its files: the directory `dirs::config_dir()` gives it, worked out by hand
+/// to keep this binary free of dependencies. %APPDATA% on Windows, XDG elsewhere.
+fn config_dir(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        set("APPDATA")?
+    } else if cfg!(target_os = "macos") {
+        set("HOME")?.join("Library").join("Application Support")
+    } else {
+        match set("XDG_CONFIG_HOME").filter(|p| p.is_absolute()) {
+            Some(dir) => dir,
+            None => set("HOME")?.join(".config"),
+        }
     };
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    Some(base.join("codenotch"))
 }
 
-/// Pulls "port": N out of %APPDATA%\codenotch\config.json (hand-rolled scan, no dependency)
+fn config_file(name: &str) -> Option<String> {
+    let path = config_dir(|v| std::env::var(v).ok())?.join(name);
+    std::fs::read_to_string(path).ok()
+}
+
+/// The token the app wrote to `auth_token`; without it the app refuses the event.
+fn read_token() -> String {
+    config_file("auth_token").map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// Pulls "port" out of config.json (hand-rolled scan, no dependency)
 fn read_port() -> u16 {
-    let path = match std::env::var("APPDATA") {
-        Ok(a) => format!("{a}\\codenotch\\config.json"),
-        Err(_) => return DEFAULT_PORT,
-    };
-    let Ok(txt) = std::fs::read_to_string(path) else {
-        return DEFAULT_PORT;
-    };
-    if let Some(i) = txt.find("\"port\"") {
-        let digits: String = txt[i + 6..]
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(p) = digits.parse() {
-            return p;
-        }
-    }
-    DEFAULT_PORT
+    config_file("config.json").and_then(|txt| parse_port(&txt)).unwrap_or(DEFAULT_PORT)
+}
+
+fn parse_port(txt: &str) -> Option<u16> {
+    let i = txt.find("\"port\"")?;
+    let digits: String = txt[i + 6..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<u16>().ok().filter(|p| *p > 0)
 }
 
 fn build_request(event: &str, ppid: u32, token: &str, body: &str) -> String {
@@ -147,5 +157,31 @@ mod tests {
         let req = build_request("running", 5678, "", "{}");
         assert!(req.contains("POST /event?e=running&ppid=5678 HTTP/1.1\r\n"));
         assert!(!req.contains("X-Codenotch-Token"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_token_is_read_from_where_the_app_writes_it_on_linux() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+        };
+        assert_eq!(config_dir(env(&[("HOME", "/home/k")])), Some(PathBuf::from("/home/k/.config/codenotch")));
+        assert_eq!(
+            config_dir(env(&[("HOME", "/home/k"), ("XDG_CONFIG_HOME", "/data/cfg")])),
+            Some(PathBuf::from("/data/cfg/codenotch"))
+        );
+        // As `dirs` does: a relative or empty XDG_CONFIG_HOME is not one.
+        assert_eq!(
+            config_dir(env(&[("HOME", "/home/k"), ("XDG_CONFIG_HOME", "cfg")])),
+            Some(PathBuf::from("/home/k/.config/codenotch"))
+        );
+        assert_eq!(config_dir(env(&[("APPDATA", "C:\\Users\\k\\AppData\\Roaming")])), None);
+    }
+
+    #[test]
+    fn the_port_is_read_out_of_the_config() {
+        assert_eq!(parse_port("{\n  \"port\": 50123,\n  \"lang\": \"auto\"\n}"), Some(50123));
+        assert_eq!(parse_port("{\"lang\":\"auto\"}"), None);
+        assert_eq!(parse_port("{\"port\": 0}"), None);
     }
 }
