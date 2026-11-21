@@ -114,16 +114,75 @@ pub fn focus_terminal(claude_pid: u32) -> bool {
     true
 }
 
-#[cfg(not(windows))]
+/// On Hyprland: the terminal is the nearest process above Claude that has a window.
+#[cfg(target_os = "linux")]
+pub fn focus_terminal(claude_pid: u32) -> bool {
+    if claude_pid == 0 {
+        return false;
+    }
+    let Some(clients) = crate::hyprland::clients() else { return false };
+    let chain = chain_of(claude_pid, &proc_maps().ppid);
+    window_of(&chain, &clients).is_some_and(|w| crate::hyprland::focus_window(&w.address))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn focus_terminal(_claude_pid: u32) -> bool {
     false
 }
 
+/// The window a process is running in: that of the first process up its chain that has one, and of
+/// those the one focused last, since a terminal can keep every window in one process.
+///
+/// Not the highest up, as on Windows: there the chain ends at the terminal, here it goes on to
+/// whatever started the terminal, and a launcher or a bar with a window of its own is not it.
+#[cfg(target_os = "linux")]
+pub fn window_of<'a>(chain: &[u32], clients: &'a [crate::hyprland::Client]) -> Option<&'a crate::hyprland::Client> {
+    chain.iter().find_map(|pid| clients.iter().filter(|c| c.pid == *pid).min_by_key(|c| c.focus_order))
+}
+
+/// Whether the window in front is the one a session runs in, which is what seeing it means.
+#[cfg(target_os = "linux")]
+pub fn in_front(front: &crate::hyprland::Client, chain: &[u32], clients: &[crate::hyprland::Client]) -> bool {
+    window_of(chain, clients).is_some_and(|w| w.pid == front.pid)
+}
+
+/// The Claude desktop app, by its window class, as there is no telling a process's window from
+/// its name here.
+#[cfg(target_os = "linux")]
+pub fn is_claude_desktop(client: &crate::hyprland::Client) -> bool {
+    let class = client.class.to_lowercase();
+    class.contains("claude") && !class.contains("codenotch")
+}
+
+/// `/proc/<pid>/stat`: the name in brackets, which may itself hold brackets and spaces, then the
+/// state and the parent.
+#[cfg(target_os = "linux")]
+fn parse_stat(stat: &str) -> Option<(String, u32)> {
+    let (open, close) = (stat.find('(')?, stat.rfind(')')?);
+    let ppid = stat.get(close + 1..)?.split_whitespace().nth(1)?.parse().ok()?;
+    Some((stat.get(open + 1..close)?.to_lowercase(), ppid))
+}
+
+#[cfg(target_os = "linux")]
+pub fn proc_maps() -> ProcMaps {
+    let mut m = ProcMaps { ppid: Default::default(), name: Default::default() };
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some((name, ppid)) = std::fs::read_to_string(entry.path().join("stat")).ok().and_then(|s| parse_stat(&s)) else {
+            continue;
+        };
+        m.ppid.insert(pid, ppid);
+        m.name.insert(pid, name);
+    }
+    m
+}
+
 // ---------------- Process and foreground helpers shared by seen-clears-it and the desktop jump-back ----------------
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub struct ProcMaps {
     pub ppid: std::collections::HashMap<u32, u32>,
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub name: std::collections::HashMap<u32, String>, // lower-case exe name
 }
 
@@ -177,7 +236,7 @@ pub fn fg_pid() -> u32 {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn chain_of(pid: u32, ppid: &std::collections::HashMap<u32, u32>) -> Vec<u32> {
     let mut chain = vec![pid];
     let mut cur = pid;
@@ -268,7 +327,70 @@ pub fn focus_claude_desktop() -> bool {
     true
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn focus_claude_desktop() -> bool {
+    let Some(clients) = crate::hyprland::clients() else { return false };
+    let window = clients.iter().filter(|c| is_claude_desktop(c)).min_by_key(|c| c.focus_order);
+    window.is_some_and(|w| crate::hyprland::focus_window(&w.address))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn focus_claude_desktop() -> bool {
     false
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::hyprland::Client;
+    use std::collections::HashMap;
+
+    fn window(address: &str, pid: u32, class: &str, focus_order: i64) -> Client {
+        Client { address: address.into(), pid, class: class.into(), workspace: "1".into(), full_screen: false, focus_order }
+    }
+
+    #[test]
+    fn a_process_is_read_out_of_proc_whatever_its_name_holds() {
+        assert_eq!(parse_stat("4242 (claude) S 4100 4242 4100 34817 4242 4194304 1"), Some(("claude".into(), 4100)));
+        assert_eq!(parse_stat("77 (Web Content (x) 1) R 60 77 77 0 -1"), Some(("web content (x) 1".into(), 60)));
+        assert_eq!(parse_stat("no such process"), None);
+        let me = std::process::id();
+        let maps = proc_maps();
+        assert_eq!(maps.ppid.get(&me), Some(&std::os::unix::process::parent_id()), "this very process, as /proc has it");
+        assert_eq!(chain_of(me, &maps.ppid)[..2], [me, std::os::unix::process::parent_id()]);
+    }
+
+    #[test]
+    fn the_terminal_is_the_nearest_window_above_claude() {
+        // Hyprland started a launcher, which started a terminal, in which a shell runs Claude
+        let ppid = HashMap::from([(500, 400), (400, 300), (300, 200), (200, 100), (100, 1), (310, 100)]);
+        let chain = chain_of(500, &ppid);
+        assert_eq!(chain, [500, 400, 300, 200, 100, 1]);
+        let clients = [window("0xb", 310, "firefox", 0), window("0xl", 200, "launcher", 1), window("0xt", 300, "foot", 2)];
+        assert_eq!(window_of(&chain, &clients).map(|w| w.address.as_str()), Some("0xt"), "not the launcher further up");
+        assert_eq!(window_of(&chain_of(310, &ppid), &clients).map(|w| w.address.as_str()), Some("0xb"));
+        assert_eq!(window_of(&chain, &clients[..1]), None, "a browser beside it is not where Claude runs");
+    }
+
+    #[test]
+    fn of_one_terminal_process_with_several_windows_it_is_the_one_used_last() {
+        let clients = [window("0x1", 300, "kitty", 4), window("0x2", 300, "kitty", 1), window("0x3", 300, "kitty", i64::MAX)];
+        assert_eq!(window_of(&[500, 400, 300], &clients).map(|w| w.address.as_str()), Some("0x2"));
+    }
+
+    #[test]
+    fn a_session_is_seen_when_its_terminal_is_in_front() {
+        let clients = [window("0xb", 310, "firefox", 1), window("0xt", 300, "foot", 0)];
+        assert!(in_front(&clients[1], &[500, 400, 300, 100], &clients));
+        assert!(!in_front(&clients[0], &[500, 400, 300, 100], &clients), "the browser is in front, not the terminal");
+        assert!(!in_front(&clients[1], &[900, 800], &clients), "another session, whose terminal has gone");
+    }
+
+    #[test]
+    fn the_desktop_app_is_known_by_its_window_class() {
+        assert!(is_claude_desktop(&window("0x1", 1, "Claude", 0)));
+        assert!(is_claude_desktop(&window("0x1", 1, "claude-desktop", 0)));
+        assert!(!is_claude_desktop(&window("0x1", 1, "Codenotch", 0)));
+        assert!(!is_claude_desktop(&window("0x1", 1, "foot", 0)));
+    }
 }

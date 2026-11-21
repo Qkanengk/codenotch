@@ -18,6 +18,7 @@ use libloading::Library;
 pub const FORCE_XWAYLAND: &str = "CODENOTCH_XWAYLAND";
 const NAMESPACE: &str = "codenotch";
 const CARD_NAMESPACE: &str = "codenotch-card";
+const CARRY_NAMESPACE: &str = "codenotch-carry";
 const LIBRARY: &str = "libgtk-layer-shell.so.0";
 
 // GtkLayerShellEdge, in the library's order
@@ -35,6 +36,9 @@ const KEYBOARD_NONE: c_int = 0;
 const WHOLE_OUTPUT: c_int = -1;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static DRAGGED: AtomicBool = AtomicBool::new(false);
+// What the carry's drag says it holds: nothing any other program asks for
+const DRAG_TARGET: &str = "application/x-codenotch-carry";
 
 type Window = *mut gtk::ffi::GtkWindow;
 
@@ -97,6 +101,13 @@ pub fn active() -> bool {
 /// window, and says why, when the compositor has no layer shell after all.
 pub fn install(window: &gtk::ApplicationWindow) -> Result<(), String> {
     adopt(window, NAMESPACE)?;
+    // A drag nobody takes "fails": that is every carry's ending, and GTK's flight of the icon back
+    // to where it was picked up would hold the ending back
+    window.connect_drag_failed(|_, _, _| {
+        DRAGGED.store(false, Ordering::SeqCst);
+        gtk::glib::Propagation::Stop
+    });
+    window.connect_drag_end(|_, _| DRAGGED.store(false, Ordering::SeqCst));
     ACTIVE.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -105,6 +116,17 @@ pub fn install(window: &gtk::ApplicationWindow) -> Result<(), String> {
 /// choose where it goes, so Hyprland would tile it. Only while the notch is one.
 pub fn install_card(window: &gtk::ApplicationWindow) -> bool {
     active() && adopt(window, CARD_NAMESPACE).is_ok()
+}
+
+/// The drawing of the notch in the hand, over its screen's work area.
+pub fn install_overlay(window: &gtk::ApplicationWindow) -> bool {
+    if !active() || adopt(window, CARRY_NAMESPACE).is_err() {
+        return false;
+    }
+    // No part of it takes the pointer, said before it is first shown and kept by GTK through
+    // every resize
+    window.input_shape_combine_region(Some(&gtk::cairo::Region::create()));
+    true
 }
 
 fn adopt(window: &gtk::ApplicationWindow, namespace: &str) -> Result<(), String> {
@@ -197,6 +219,32 @@ pub fn pointer_in(window: &gtk::ApplicationWindow) -> Option<(i32, i32)> {
     let pointer = surface.display().default_seat()?.pointer()?;
     let (_, x, y, _) = surface.device_position(&pointer);
     Some((x, y))
+}
+
+/// The press on the notch handed to Hyprland as a drag, which is how a Wayland client goes on
+/// hearing of a held button once the pointer is off its own surface. A plain press is not enough:
+/// Hyprland keeps it with the notch only while some window has the keyboard, so on an empty
+/// workspace it ended the moment the pointer left the notch. Nothing takes the drop; the drag is
+/// there to be told when the button comes up, on whichever screen.
+pub fn begin_drag(window: &gtk::ApplicationWindow) -> bool {
+    if !active() || !gtk::is_initialized_main_thread() {
+        return false;
+    }
+    let targets = gtk::TargetList::new(&[gtk::TargetEntry::new(DRAG_TARGET, gtk::TargetFlags::SAME_APP, 0)]);
+    let Some(drag) = window.drag_begin_with_coordinates(&targets, gtk::gdk::DragAction::MOVE, 1, None, -1, -1) else {
+        return false;
+    };
+    // The overlay draws the notch in the hand; GTK's own icon beside the pointer would be a second one
+    if let Ok(blank) = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 1, 1) {
+        drag.drag_set_icon_surface(&blank);
+    }
+    DRAGGED.store(true, Ordering::SeqCst);
+    true
+}
+
+/// Whether the drag `begin_drag` began is still on: the button is still down.
+pub fn dragged() -> bool {
+    DRAGGED.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]

@@ -153,6 +153,99 @@ pub fn outputs() -> Vec<Output> {
     outputs
 }
 
+/// A window Hyprland is showing somewhere, as `j/clients` has it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Client {
+    pub address: String,
+    pub pid: u32,
+    pub class: String,
+    pub workspace: String,
+    /// Over its whole output, bars and all. A maximised window is not: the bars stay.
+    pub full_screen: bool,
+    /// 0 for the window focused last, counting up; `i64::MAX` for one never focused.
+    pub focus_order: i64,
+}
+
+/// 0.42 on gives the mode as bits, 1 maximised and 2 full screen; before it was a flag and a mode.
+fn is_full_screen(client: &serde_json::Value) -> bool {
+    match &client["fullscreen"] {
+        serde_json::Value::Bool(on) => *on && client["fullscreenMode"].as_i64() != Some(1),
+        mode => mode.as_i64().is_some_and(|mode| mode & 2 != 0),
+    }
+}
+
+fn parse_client(c: &serde_json::Value) -> Option<Client> {
+    if c["mapped"] == false || c["hidden"] == true {
+        return None;
+    }
+    Some(Client {
+        address: c["address"].as_str()?.to_string(),
+        pid: u32::try_from(c["pid"].as_i64()?).ok()?,
+        class: c["class"].as_str().unwrap_or_default().to_string(),
+        workspace: c["workspace"]["name"].as_str().unwrap_or_default().to_string(),
+        full_screen: is_full_screen(c),
+        focus_order: c["focusHistoryID"].as_i64().filter(|n| *n >= 0).unwrap_or(i64::MAX),
+    })
+}
+
+/// None when the answer is not a list of windows at all, as from a Hyprland that is not there.
+fn parse_clients(clients: &str) -> Option<Vec<Client>> {
+    let serde_json::Value::Array(clients) = serde_json::from_str(clients).ok()? else { return None };
+    Some(clients.iter().filter_map(parse_client).collect())
+}
+
+/// Every window of the running Hyprland; None when it cannot be asked.
+pub fn clients() -> Option<Vec<Client>> {
+    parse_clients(&request(&socket(".socket.sock")?, "j/clients").ok()?)
+}
+
+/// The window with the keyboard; None on an empty workspace, and when Hyprland cannot be asked.
+pub fn active_window() -> Option<Client> {
+    parse_client(&serde_json::from_str(&request(&socket(".socket.sock")?, "j/activewindow").ok()?).ok()?)
+}
+
+/// The names of the outputs with a full-screen window on the workspace they are showing.
+fn covered(monitors: &str, clients: &[Client]) -> Option<Vec<String>> {
+    let serde_json::Value::Array(monitors) = serde_json::from_str(monitors).ok()? else { return None };
+    let covered = monitors.iter().filter_map(|m| {
+        let showing = [m["activeWorkspace"]["name"].as_str(), m["specialWorkspace"]["name"].as_str()];
+        let on_it = |c: &Client| showing.iter().flatten().any(|w| !w.is_empty() && *w == c.workspace);
+        clients.iter().any(|c| c.full_screen && on_it(c)).then(|| m["name"].as_str().map(str::to_string))?
+    });
+    Some(covered.collect())
+}
+
+/// None when Hyprland cannot be asked, which is every other desktop.
+pub fn covered_outputs() -> Option<Vec<String>> {
+    let socket = socket(".socket.sock")?;
+    let clients = parse_clients(&request(&socket, "j/clients").ok()?)?;
+    covered(&request(&socket, "j/monitors").ok()?, &clients)
+}
+
+/// A Lua config's dispatcher first (0.57), then the one older configs have.
+fn focus_requests(address: &str) -> [String; 2] {
+    [
+        format!(r#"dispatch hl.dsp.focus({{ window = "address:{address}" }})"#),
+        format!("dispatch focuswindow address:{address}"),
+    ]
+}
+
+fn focus_at(socket: &Path, address: &str) -> bool {
+    // Straight into a line of Lua, so nothing but the address Hyprland gave
+    address.chars().all(|c| c.is_ascii_alphanumeric())
+        && focus_requests(address).iter().any(|r| request(socket, r).is_ok_and(|reply| reply.trim() == "ok"))
+}
+
+/// Gives a window the keyboard, going to its workspace if it is on another.
+pub fn focus_window(address: &str) -> bool {
+    socket(".socket.sock").is_some_and(|socket| focus_at(&socket, address))
+}
+
+/// Where the cursor is in Hyprland's layout, in logical pixels.
+pub fn cursor() -> Option<(f64, f64)> {
+    parse_cursor(&request(&socket(".socket.sock")?, "cursorpos").ok()?)
+}
+
 fn lua_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -287,6 +380,73 @@ mod tests {
         assert!(WINDOW_RULE.contains(r#"class = "^Codenotch$""#));
         assert!(WINDOW_RULE.contains(&format!("title = \"^Codenotch( {}| carry)?$\"", NOTCH_TITLE.trim_start_matches("Codenotch "))));
         assert!(!WINDOW_RULE.contains('\n'), "the socket takes one line");
+    }
+
+    const WINDOWS: &str = r#"[
+        {"address": "0xa1", "mapped": true, "hidden": false, "workspace": {"id": 1, "name": "1"}, "class": "foot", "pid": 700, "fullscreen": 0, "focusHistoryID": 1},
+        {"address": "0xa2", "mapped": true, "hidden": false, "workspace": {"id": 2, "name": "2"}, "class": "mpv", "pid": 800, "fullscreen": 2, "focusHistoryID": 0},
+        {"address": "0xa3", "mapped": true, "hidden": false, "workspace": {"id": 3, "name": "3"}, "class": "firefox", "pid": 900, "fullscreen": 1, "focusHistoryID": 2},
+        {"address": "0xa4", "mapped": true, "hidden": true, "workspace": {"id": 1, "name": "1"}, "class": "foot", "pid": 701, "fullscreen": 2, "focusHistoryID": 3},
+        {"address": "0xa5", "mapped": true, "hidden": false, "workspace": {"id": -98, "name": "special:magic"}, "class": "kitty", "pid": 702, "fullscreen": 3, "focusHistoryID": -1}
+    ]"#;
+
+    fn monitors(showing: [(&str, &str); 2]) -> String {
+        let one = |name: &str, (active, special): (&str, &str)| {
+            format!(r#"{{"name": "{name}", "activeWorkspace": {{"id": 1, "name": "{active}"}}, "specialWorkspace": {{"name": "{special}"}}}}"#)
+        };
+        format!("[{}, {}]", one("DP-1", showing[0]), one("HDMI-A-1", showing[1]))
+    }
+
+    #[test]
+    fn windows_are_read_with_who_owns_them_and_whether_they_fill_the_screen() {
+        let clients = parse_clients(WINDOWS).unwrap();
+        assert_eq!(clients.len(), 4, "a hidden window is not one Hyprland is showing");
+        assert_eq!(
+            clients[1],
+            Client { address: "0xa2".into(), pid: 800, class: "mpv".into(), workspace: "2".into(), full_screen: true, focus_order: 0 }
+        );
+        assert!(!clients[0].full_screen);
+        assert!(!clients[2].full_screen, "maximised keeps the bars, so the notch stays");
+        assert!(clients[3].full_screen, "full screen and maximised at once is full screen");
+        assert_eq!(clients[3].focus_order, i64::MAX, "never focused comes after every window that was");
+        assert_eq!(parse_clients("unknown request"), None);
+        assert_eq!(parse_clients("[]"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn an_older_hyprland_says_full_screen_with_a_flag_and_a_mode() {
+        let client = |fields: &str| serde_json::from_str::<serde_json::Value>(&format!("{{{fields}}}")).unwrap();
+        assert!(is_full_screen(&client(r#""fullscreen": true, "fullscreenMode": 0"#)));
+        assert!(!is_full_screen(&client(r#""fullscreen": true, "fullscreenMode": 1"#)), "maximised");
+        assert!(!is_full_screen(&client(r#""fullscreen": false, "fullscreenMode": 0"#)));
+        assert!(!is_full_screen(&client(r#""class": "foot""#)));
+    }
+
+    #[test]
+    fn an_output_is_covered_only_while_it_shows_the_full_screen_window() {
+        let clients = parse_clients(WINDOWS).unwrap();
+        let covered = |showing| covered(&monitors(showing), &clients).unwrap();
+        assert_eq!(covered([("1", ""), ("3", "")]), Vec::<String>::new(), "a window and a maximised one");
+        assert_eq!(covered([("2", ""), ("1", "")]), vec!["DP-1"]);
+        assert_eq!(covered([("1", ""), ("2", "")]), vec!["HDMI-A-1"], "the other output's notch stays up");
+        assert_eq!(covered([("1", "special:magic"), ("2", "")]), vec!["DP-1", "HDMI-A-1"], "a special workspace over it");
+        assert_eq!(super::covered("unknown request", &clients), None);
+    }
+
+    #[test]
+    fn a_window_is_focused_the_lua_way_and_then_the_old_way() {
+        let (socket, requests) = fake_hyprland("ok");
+        assert!(focus_at(&socket, "0x5f3a"));
+        assert_eq!(requests.recv().unwrap(), r#"dispatch hl.dsp.focus({ window = "address:0x5f3a" })"#);
+        assert!(requests.try_recv().is_err(), "taken the first time, it is not asked twice");
+        assert!(!focus_at(&socket, r#"0x1" }) os.exit() --"#), "only an address goes into the Lua");
+        assert!(requests.try_recv().is_err());
+        let _ = std::fs::remove_file(socket);
+
+        let (socket, requests) = fake_hyprland("Invalid dispatcher");
+        assert!(!focus_at(&socket, "0x5f3a"));
+        assert_eq!(requests.iter().take(2).last().unwrap(), "dispatch focuswindow address:0x5f3a");
+        let _ = std::fs::remove_file(socket);
     }
 
     const CLIENTS: &str = r#"[

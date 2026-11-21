@@ -127,7 +127,40 @@ fn read(app: &AppHandle) -> Reading {
     }
 }
 
-#[cfg(not(windows))]
+/// Hyprland says outright which windows are full screen and which workspace each output shows, so
+/// the notch's own output is asked about rather than the window in front: a film on the other
+/// screen folds nothing here. Any other desktop is left alone.
+#[cfg(target_os = "linux")]
+fn read(app: &AppHandle) -> Reading {
+    let Some(screen) = crate::attached_screen(app) else { return Reading::Unchanged };
+    let Some(covered) = crate::hyprland::covered_outputs() else { return Reading::Unchanged };
+    on_hyprland(&screen, &crate::hyprland::outputs(), &covered)
+}
+
+/// Hyprland's name for the output a screen is. The notch as a layer surface already goes by it;
+/// through XWayland the screen has X11's name for it, so it is found by where it is.
+#[cfg(target_os = "linux")]
+fn output_of<'a>(screen: &Screen, outputs: &'a [crate::hyprland::Output]) -> Option<&'a str> {
+    let scale = screen.scale.max(0.01);
+    let at = ((screen.x as f64 / scale).round() as i32, (screen.y as f64 / scale).round() as i32);
+    outputs
+        .iter()
+        .find(|o| Some(o.name.as_str()) == screen.name.as_deref())
+        .or_else(|| outputs.iter().find(|o| o.at == at))
+        .or(outputs.first().filter(|_| outputs.len() == 1))
+        .map(|o| o.name.as_str())
+}
+
+#[cfg(target_os = "linux")]
+fn on_hyprland(screen: &Screen, outputs: &[crate::hyprland::Output], covered: &[String]) -> Reading {
+    match output_of(screen, outputs) {
+        Some(name) if covered.iter().any(|c| c == name) => Reading::Full((screen.x, screen.y, screen.w, screen.h)),
+        Some(_) => Reading::Windowed,
+        None => Reading::Unchanged,
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn read(_app: &AppHandle) -> Reading {
     Reading::Unchanged
 }
@@ -186,6 +219,30 @@ mod tests {
         *FILLED.lock().unwrap() = Some((2560, 0, 1920, 1080));
         assert_eq!(apply(s).work, (0, 0, 2560, 1528), "full screen on the other monitor");
         *FILLED.lock().unwrap() = None;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_hyprland_the_notch_folds_for_a_full_screen_window_on_its_own_output_only() {
+        use crate::hyprland::Output;
+        let outputs = [
+            Output { name: "DP-1".into(), at: (0, 0), reserved: [0, 40, 0, 0] },
+            Output { name: "HDMI-A-1".into(), at: (1707, 0), reserved: [0; 4] },
+        ];
+        let notch = Screen { name: Some("DP-1".into()), x: 0, y: 0, w: 2560, h: 1600, scale: 1.5, work: (0, 60, 2560, 1540) };
+        let covered = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(on_hyprland(&notch, &outputs, &covered(&["DP-1"])), Reading::Full(SCREEN));
+        assert_eq!(on_hyprland(&notch, &outputs, &covered(&["HDMI-A-1"])), Reading::Windowed, "a film on the other screen");
+        assert_eq!(on_hyprland(&notch, &outputs, &[]), Reading::Windowed);
+
+        // Through XWayland the screen has X11's name, or none: it is the output at the same place
+        let by_place = Screen { name: Some("XWAYLAND1".into()), x: 1707, y: 0, w: 1920, h: 1080, scale: 1.0, work: (1707, 0, 1920, 1080) };
+        assert_eq!(output_of(&by_place, &outputs), Some("HDMI-A-1"));
+        assert_eq!(on_hyprland(&by_place, &outputs, &covered(&["HDMI-A-1"])), Reading::Full((1707, 0, 1920, 1080)));
+
+        let nowhere = Screen { name: None, x: 5000, y: 0, w: 1920, h: 1080, scale: 1.0, work: (5000, 0, 1920, 1080) };
+        assert_eq!(on_hyprland(&nowhere, &outputs, &covered(&["DP-1"])), Reading::Unchanged, "no telling which output it is");
+        assert_eq!(output_of(&nowhere, &outputs[..1]), Some("DP-1"), "with one output there is nothing to tell apart");
     }
 
     #[test]

@@ -147,6 +147,8 @@
   .c-note{font-size:12px;color:var(--ink-3);line-height:1.5;margin-top:6px}
   .c-sessions{margin-top:12px;border-top:1px solid var(--card-rule);padding-top:8px}
   .s-row{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-4);padding:2px 0}
+  .s-jump{cursor:pointer}
+  .s-jump:hover{color:var(--ink)}
   .s-dot{width:6px;height:6px;border-radius:3px;flex:0 0 auto}
   .s-more{font-size:11px;color:var(--ink-dim);padding:2px 0}
 
@@ -1845,12 +1847,12 @@ function renderCard(){
     if(snap.note) html+=`<div class="c-note">${esc(textCopy(snap.note))}</div>`;
   }
   if(offersClaudeSignIn(p)) html+=claudeAuthHtml(claudeAuth,claudeActionMessage);
-  if(p.base==='claude'){ // live sessions (a full list with jump-to-session is a follow-up)
+  if(p.base==='claude'){ // live sessions; a click on a row raises the terminal it runs in (the Mac's onFocusSession)
     const act=stateSnap.sessions.filter(s=>s.state!=='idle');
     if(act.length){
       html+=`<div class="c-sessions">`;
       for(const s of act.slice(0,SESSION_ROWS)){
-        html+=`<div class="s-row"><span class="s-dot" style="background:${STATE_DOT[s.state]||'#666'}"></span>${esc(s.title)}</div>`;
+        html+=`<div ${sessionAttrs(s.id)}><span class="s-dot" style="background:${STATE_DOT[s.state]||'#666'}"></span>${esc(s.title)}</div>`;
       }
       html+=moreRow(act.length-SESSION_ROWS)+`</div>`;
     }
@@ -1934,10 +1936,27 @@ function placeTaskbarCard(){
     .catch(()=>{lastCardSize='';});
 }
 
+// BEGIN TESTABLE SESSION-JUMP SELECTOR
+// A session row's own attributes: the session it stands for, kept whole whatever its id holds
+function sessionAttrs(id){ return `class="s-row s-jump" data-session="${encodeURIComponent(id||'')}"`; }
+// The row a click in the card landed on, as the session to jump to. The card is redrawn on every
+// state event, so the rows are found from the card rather than each given a listener of its own
+function sessionAt(target){
+  const row=target&&target.closest?target.closest('.s-jump'):null;
+  if(!row) return '';
+  try{ return decodeURIComponent(row.dataset.session||''); }catch(e){ return ''; }
+}
+// END TESTABLE SESSION-JUMP SELECTOR
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
 
 /* Hover: stays expanded while either the pill or the card is under the cursor; collapses after a 250 ms grace period (upstream motion rule) */
 const card=document.getElementById('card'), pill=document.getElementById('pill'), tail=document.getElementById('tail');
+card.addEventListener('click',e=>{
+  const id=sessionAt(e.target);
+  if(!id) return;
+  e.stopPropagation();
+  invoke('focus_session',{id}).catch(err=>notice('focus_session failed: '+err));
+});
 // Rust lets clicks through everything outside the hot rectangles, so they travel with the card, frame
 // by frame, and settle where it stops. A card already where it is going gets no transitionend.
 let glideEnd=null;

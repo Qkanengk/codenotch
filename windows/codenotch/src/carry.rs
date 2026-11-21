@@ -234,6 +234,12 @@ fn local(s: &crate::Screen, x: f64, y: f64) -> (f64, f64) {
     ((x - ax as f64) / s.scale, (y - ay as f64) / s.scale)
 }
 
+/// The pointer in a screen's work area, in logical pixels from its top-left corner.
+fn at(s: &crate::Screen, pointer: Pointer) -> (f64, f64) {
+    let (x, y) = pointer.on(s);
+    local(s, x, y)
+}
+
 fn reach_on(s: &crate::Screen, size: f64) -> f64 {
     let (_, _, aw, ah) = s.area();
     let half = crate::NOTCH_LONG * size / 2.0;
@@ -265,17 +271,81 @@ fn wait_for(flag: &AtomicU32, seq: u32, ms: u64) -> bool {
     false
 }
 
-/// Alt+drag on the pill. The page empties once the overlay has the notch drawn; from then on the
-/// pointer is followed here and its place on the border sent to the overlay, until the button comes up.
-#[tauri::command]
-pub fn begin_carry(app: AppHandle, shape: serde_json::Value) {
-    // The drawing is a window over the whole work area, which only X11 lets a client place, and
-    // nothing here can tell when the button is let go off Windows: the notch stays where it is.
+/// Where the pointer is, as the platform reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pointer {
+    x: f64,
+    y: f64,
+    /// Hyprland's layout pixels, which GDK scales by each screen's own factor, rather than one
+    /// physical grid for every screen as on Windows.
+    logical: bool,
+}
+
+impl Pointer {
+    /// In the pixels `screen` is measured in.
+    fn on(&self, screen: &crate::Screen) -> (f64, f64) {
+        if self.logical {
+            (self.x * screen.scale, self.y * screen.scale)
+        } else {
+            (self.x, self.y)
+        }
+    }
+
+    /// The screen it is over. Each is tried in its own pixels: two screens at different scales
+    /// overlap in GDK's, where a point alone does not say which one it is on.
+    fn over<'a>(&self, all: &'a [crate::Screen]) -> Option<&'a crate::Screen> {
+        all.iter().find(|s| {
+            let (x, y) = self.on(s);
+            crate::screen_at(std::slice::from_ref(*s), x, y).is_some()
+        })
+    }
+
+    /// How far off `from` it is, in logical pixels: those of `onto`, the screen it is over, where
+    /// every screen shares one grid, and `from`'s own where each has its own.
+    fn depth(&self, from: &crate::Screen, onto: &crate::Screen) -> f64 {
+        let (x, y) = self.on(from);
+        beyond(from, x, y) / if self.logical { from.scale } else { onto.scale }
+    }
+}
+
+fn pointer(app: &AppHandle) -> Option<Pointer> {
     #[cfg(target_os = "linux")]
     if crate::layer_shell::active() {
-        let _ = (shape, app.emit_to("notch", "drag_end", true));
-        return;
+        return crate::hyprland::cursor().map(|(x, y)| Pointer { x, y, logical: true });
     }
+    app.cursor_position().ok().map(|at| Pointer { x: at.x, y: at.y, logical: false })
+}
+
+/// Whether the button the notch was taken with is still down.
+fn held(app: &AppHandle) -> bool {
+    #[cfg(target_os = "linux")]
+    if crate::layer_shell::active() {
+        return crate::layer_shell::dragged();
+    }
+    let _ = app;
+    crate::left_button_down()
+}
+
+/// GTK is only for the main thread, and the carry runs on one of its own.
+#[cfg(target_os = "linux")]
+fn on_main<T: Send + 'static>(app: &AppHandle, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (done, result) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = done.send(f());
+    })
+    .ok()?;
+    result.recv_timeout(std::time::Duration::from_millis(500)).ok()
+}
+
+/// Alt+drag on the pill, or its six dots taken hold of. The page empties once the overlay has the
+/// notch drawn; from then on the pointer is followed here and its place on the border sent to the
+/// overlay, until the button comes up.
+///
+/// As an X11 window off Windows nothing tells when the button is let go, so the notch is put
+/// straight back down. As a layer surface on Hyprland it is carried: the press becomes a drag
+/// (`layer_shell::begin_drag`), which ends when the button comes up, wherever the pointer has gone.
+#[tauri::command]
+pub fn begin_carry(app: AppHandle, shape: serde_json::Value) {
     if crate::DRAGGING.swap(true, SeqCst) {
         return;
     }
@@ -290,9 +360,18 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
     let (Some(start), Some(notch)) = (crate::target_screen(app), app.get_webview_window("notch")) else {
         return;
     };
-    let (Ok(pos), Ok(win), Ok(cur)) = (notch.outer_position(), notch.outer_size(), app.cursor_position()) else {
+    let (Some((nx, ny, nw, nh)), Some(cur)) = (crate::notch_rect(&notch), pointer(app)) else {
         return;
     };
+    #[cfg(target_os = "linux")]
+    if as_layer() {
+        let window = notch.clone();
+        let begun = move || window.gtk_window().is_ok_and(|w| crate::layer_shell::begin_drag(&w));
+        if on_main(app, begun) != Some(true) {
+            crate::applog("carry: no drag could be begun from the notch; it stays where it is");
+            return;
+        }
+    }
     let from = Edge::parse(&{
         let st = app.state::<crate::AppState>();
         let c = st.cfg.lock().unwrap();
@@ -302,9 +381,9 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
     let mut mon = start.clone();
     let mut track = track_of(&mon);
     // The notch is centred in its window along the edge, so the window's middle is the notch's
-    let (mx, my) = local(&mon, pos.x as f64 + win.width as f64 / 2.0, pos.y as f64 + win.height as f64 / 2.0);
+    let (mx, my) = local(&mon, nx as f64 + nw as f64 / 2.0, ny as f64 + nh as f64 / 2.0);
     let middle = track.position_on(from, mx, my);
-    let (px, py) = local(&mon, cur.x, cur.y);
+    let (px, py) = at(&mon, cur);
     let mut pointer_edge = from;
     let mut read = reading(px, py, &track, from);
     let mut grip = track.signed(middle - place(px, py, &track, read));
@@ -330,16 +409,14 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
 
     let all = crate::screens(app);
     let mut last = middle;
-    while crate::left_button_down() {
-        if let Ok(cur) = app.cursor_position() {
-            if let Some(s) = crate::screen_at(&all, cur.x, cur.y)
-                .filter(|s| !crate::same_screen(s, &mon) && beyond(&mon, cur.x, cur.y) / s.scale >= CROSS)
-            {
+    while held(app) {
+        if let Some(cur) = pointer(app) {
+            if let Some(s) = cur.over(&all).filter(|s| !crate::same_screen(s, &mon) && cur.depth(&mon, s) >= CROSS) {
                 // Onto another screen: there is no border between the two to travel, so it arrives
                 // under the pointer on the edge nearest it
                 mon = s.clone();
                 track = track_of(&mon);
-                let (px, py) = local(&mon, cur.x, cur.y);
+                let (px, py) = at(&mon, cur);
                 pointer_edge = sticky_edge(pointer_edge, px, py, &track);
                 read = reading(px, py, &track, pointer_edge);
                 grip = 0.0;
@@ -350,7 +427,7 @@ fn run(app: &AppHandle, shape: serde_json::Value) {
                 relocate(app, &mon);
                 continue;
             }
-            let (px, py) = local(&mon, cur.x, cur.y);
+            let (px, py) = at(&mon, cur);
             let edge = sticky_edge(pointer_edge, px, py, &track);
             let now = reading(px, py, &track, edge);
             // A new way of reading the pointer's place moves that place, so the grip takes it up
@@ -432,6 +509,7 @@ fn show(app: &AppHandle, screen: &crate::Screen) {
         pin(&w, screen);
         let _ = w.emit_to(LABEL, "carry_init", CURRENT.lock().unwrap().clone());
         let _ = w.show();
+        ignore_pointer(&w);
         return;
     }
     let (ax, ay, aw, ah) = screen.area();
@@ -447,20 +525,70 @@ fn show(app: &AppHandle, screen: &crate::Screen) {
         .focused(false)
         .focusable(false)
         .resizable(false)
+        // A window becomes a layer surface before it is first shown, or not at all
+        .visible(!as_layer())
         .theme(crate::theme_choice(app))
         .initialization_script(crate::theme_script(crate::resolved_theme(app)));
     match builder.build() {
         Ok(w) => {
+            #[cfg(target_os = "linux")]
+            if as_layer() {
+                let window = w.clone();
+                let adopted = move || window.gtk_window().is_ok_and(|w| crate::layer_shell::install_overlay(&w));
+                if on_main(app, adopted) != Some(true) {
+                    crate::applog("carry overlay: not a layer surface; carried without it");
+                    let _ = w.destroy();
+                    return;
+                }
+            }
             pin(&w, screen);
-            let _ = w.set_ignore_cursor_events(true);
+            let _ = w.show();
+            ignore_pointer(&w);
         }
         Err(e) => crate::applog(&format!("carry overlay: {e}")),
     }
 }
 
+/// A layer surface takes no pointer from the moment it is adopted (`install_overlay`), and
+/// asking it here as well would leave it one pixel that does.
+fn ignore_pointer(w: &tauri::WebviewWindow) {
+    if !as_layer() {
+        let _ = w.set_ignore_cursor_events(true);
+    }
+}
+
+/// The drawing is a layer surface wherever the notch is one: Wayland lets no ordinary window say
+/// where it goes, so Hyprland would tile it.
+fn as_layer() -> bool {
+    #[cfg(target_os = "linux")]
+    return crate::layer_shell::active();
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
+/// The output's origin, the work area's size, and the work area's corner inside the output, all in
+/// logical pixels: what a layer surface is laid out in.
+#[cfg(target_os = "linux")]
+fn layer_place(screen: &crate::Screen) -> ((i32, i32), (i32, i32), crate::layer_shell::Placement) {
+    let logical = |v: i32| (v as f64 / screen.scale.max(0.01)).round() as i32;
+    let (ax, ay, aw, ah) = screen.area();
+    let corner = crate::layer_shell::corner((logical(ax - screen.x), logical(ay - screen.y)));
+    ((logical(screen.x), logical(screen.y)), (logical(aw.max(1)), logical(ah.max(1))), corner)
+}
+
 /// Pinned in physical pixels, as the drop zones are: the builder's logical figures are converted
 /// with whichever monitor Windows decides the window belongs to.
 fn pin(w: &tauri::WebviewWindow, screen: &crate::Screen) {
+    #[cfg(target_os = "linux")]
+    if as_layer() {
+        let (window, (origin, size, to)) = (w.clone(), layer_place(screen));
+        let _ = w.run_on_main_thread(move || {
+            if let Ok(window) = window.gtk_window() {
+                crate::layer_shell::place(&window, origin, size, &to);
+            }
+        });
+        return;
+    }
     let (ax, ay, aw, ah) = screen.area();
     let size = tauri::PhysicalSize::new(aw.max(1) as u32, ah.max(1) as u32);
     for _ in 0..2 {
@@ -480,6 +608,7 @@ fn relocate(app: &AppHandle, screen: &crate::Screen) {
     let _ = w.emit_to(LABEL, "carry_init", CURRENT.lock().unwrap().clone());
     std::thread::sleep(std::time::Duration::from_millis(40));
     let _ = w.show();
+    ignore_pointer(&w);
 }
 
 fn hide(app: &AppHandle) {
@@ -516,6 +645,48 @@ mod tests {
     use super::*;
 
     const TRACK: BorderTrack = BorderTrack { width: 1800.0, height: 1169.0 };
+
+    fn screen(name: &str, x: i32, w: i32, h: i32, scale: f64, top: i32) -> crate::Screen {
+        crate::Screen { name: Some(name.into()), x, y: 0, w, h, scale, work: (x, top, w, h - top) }
+    }
+
+    #[test]
+    fn on_windows_the_pointer_is_in_the_same_pixels_as_every_screen() {
+        let all = [screen("1", 0, 2560, 1440, 1.5, 0), screen("2", 2560, 1920, 1080, 1.0, 0)];
+        let p = Pointer { x: 2700.0, y: 300.0, logical: false };
+        assert_eq!(p.on(&all[0]), (2700.0, 300.0));
+        assert_eq!(p.over(&all).and_then(|s| s.name.as_deref()), Some("2"));
+        assert_eq!(p.depth(&all[0], &all[1]), 140.0, "in the pixels of the screen it has gone onto");
+        assert!(Pointer { x: 2700.0, y: 1200.0, logical: false }.over(&all).is_none(), "below the smaller screen");
+    }
+
+    #[test]
+    fn on_hyprland_the_pointer_is_scaled_into_each_screens_own_pixels() {
+        // A 1.5 output GDK scales by 2, 1280 logical pixels wide, and a 1920 one at scale 1 beside
+        // it: in GDK's pixels the first reaches 2560 and the second starts at 1280
+        let all = [screen("DP-1", 0, 2560, 1440, 2.0, 80), screen("HDMI-A-1", 1280, 1920, 1080, 1.0, 0)];
+        let on_first = Pointer { x: 1000.0, y: 300.0, logical: true };
+        assert_eq!(on_first.on(&all[0]), (2000.0, 600.0));
+        assert_eq!(on_first.over(&all).and_then(|s| s.name.as_deref()), Some("DP-1"));
+        assert_eq!(at(&all[0], on_first), (1000.0, 260.0), "from the work area's corner, under a 40 pixel bar");
+        assert_eq!(on_first.depth(&all[0], &all[1]), 0.0);
+
+        let on_second = Pointer { x: 1400.0, y: 300.0, logical: true };
+        assert_eq!(on_second.over(&all).and_then(|s| s.name.as_deref()), Some("HDMI-A-1"), "not the first, whose pixels reach 2560");
+        assert_eq!(on_second.depth(&all[0], &all[1]), 120.0, "not yet far enough onto it to cross");
+        assert_eq!(at(&all[1], on_second), (120.0, 300.0));
+        assert!(Pointer { x: 1431.0, y: 300.0, logical: true }.depth(&all[0], &all[1]) >= CROSS);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_drawing_is_laid_over_the_work_area_in_logical_pixels() {
+        let (origin, size, to) = layer_place(&screen("DP-1", 0, 2560, 1440, 2.0, 80));
+        assert_eq!((origin, size), ((0, 0), (1280, 680)));
+        assert_eq!(to, crate::layer_shell::corner((0, 40)), "below the bar");
+        let (origin, size, to) = layer_place(&screen("HDMI-A-1", 1280, 1920, 1080, 1.0, 0));
+        assert_eq!((origin, size, to), ((1280, 0), (1920, 1080), crate::layer_shell::corner((0, 0))));
+    }
 
     // The Mac's `OptionCarryTests` are in AppKit's bottom-left-origin points; here the same points
     // are in top-left-origin ones, y turned over.

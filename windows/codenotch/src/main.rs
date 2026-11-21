@@ -2179,7 +2179,27 @@ fn ack_scan(app: &AppHandle) -> bool {
         }
     })
 }
-#[cfg(not(windows))]
+/// On Hyprland, where the window with the keyboard is the one being looked at.
+#[cfg(target_os = "linux")]
+fn ack_scan(app: &AppHandle) -> bool {
+    let st = app.state::<AppState>();
+    if !st.store.lock().unwrap().has_done() {
+        return false;
+    }
+    let (Some(front), Some(clients)) = (hyprland::active_window(), hyprland::clients()) else {
+        return false;
+    };
+    let ppid = focus::proc_maps().ppid;
+    let mut store = st.store.lock().unwrap();
+    store.ack_done(|s| {
+        if s.ppid == 0 {
+            focus::is_claude_desktop(&front)
+        } else {
+            focus::in_front(&front, &focus::chain_of(s.ppid, &ppid), &clients)
+        }
+    })
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn ack_scan(_app: &AppHandle) -> bool {
     false
 }
