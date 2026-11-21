@@ -21,6 +21,7 @@ jobs:
   package:
     name: makepkg, install, start
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       # All of the history: the package version counts the commits.
       - uses: actions/checkout@v7
@@ -53,7 +54,7 @@ jobs:
           }
           ls -l /dev/dri
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/arch-cargo/registry
@@ -91,7 +92,10 @@ jobs:
             pacman -U --noconfirm codenotch-git-*.pkg.tar.zst
             pacman -Ql codenotch-git'
 
+      # Seconds when it works. Without the limit, anything in it that waits
+      # for a frame holds the job for six hours.
       - name: Start what was installed, on Hyprland
+        timeout-minutes: 5
         run: docker exec -u builder arch /repo/windows/packaging/arch/smoke-test.sh /repo/out/smoke
 
       - uses: actions/upload-artifact@v7

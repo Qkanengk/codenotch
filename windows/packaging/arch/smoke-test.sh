@@ -47,7 +47,12 @@ wait_for() {
 }
 
 cleanup() {
-  [ ${#pids[@]} -eq 0 ] || kill "${pids[@]}" 2>/dev/null
+  if [ ${#pids[@]} -gt 0 ]; then
+    kill "${pids[@]}" 2>/dev/null
+    # Not everything here leaves when asked, and the wait below has no end.
+    sleep 1
+    kill -9 "${pids[@]}" 2>/dev/null
+  fi
   wait 2>/dev/null
   rm -rf "$scratch"
 }
@@ -91,9 +96,14 @@ wait_for 60 grep -q 'notch placed' "$log" || fail "run.log has no 'notch placed'
 grep -q 'hyprland: the notch is a layer surface' "$log" || fail "the notch is not a layer surface"
 wait_for 30 sh -c "hyprctl layers | grep -q 'namespace: codenotch'" || fail "Hyprland lists no codenotch layer"
 hyprctl layers >"$out/layers.txt"
-# The page needs a moment after the surface is there.
+# The page needs a moment after the surface is there. Only the monitor the
+# notch is on, and not for ever: a machine's own display device is a second
+# monitor that may never draw a frame, and grim waits for one from each.
 sleep 5
-command -v grim >/dev/null && grim "$out/screenshot.png"
+monitor=$(sed -n 's/.*notch placed.*monitor=Some("\([^"]*\)").*/\1/p' "$log" | head -n1)
+if command -v grim >/dev/null; then
+  timeout 20 grim ${monitor:+-o "$monitor"} "$out/screenshot.png" || echo "no screenshot: grim gave up on ${monitor:-the display}"
+fi
 
 kill -0 "$app" 2>/dev/null || fail "codenotch exited"
 cp "$log" "$out/run.log"
