@@ -1,0 +1,106 @@
+name: Arch package
+
+# The Linux build under windows/ is installed on Arch and CachyOS with the
+# PKGBUILD in windows/packaging/arch. Windows builds the same crate on Ubuntu
+# and stops at cargo; this is the only job that goes on to a package, installs
+# it and starts what it installed. No repository condition, unlike the other
+# workflows: a fork is where this package is built from.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/arch.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/arch.yml'
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: makepkg, install, start
+    runs-on: ubuntu-latest
+    steps:
+      # All of the history: the package version counts the commits.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Quick, and cargo never reads the pages. Node is already on the runner.
+      - name: Check and test the UI pages
+        working-directory: windows
+        run: |
+          node scripts/check-ui-scripts.mjs
+          node scripts/test-update-ui.cjs
+          node scripts/test-claude-auth-ui.cjs
+          node scripts/test-claude-quota-freshness.cjs
+          node scripts/test-notch-pct.cjs
+          node test-qoder-usage.cjs
+          node --test test-light-surface.cjs test-carry.cjs test-accounts-taskbar.cjs \
+                      test-deficit.cjs scripts/test-ko-i18n.cjs scripts/test-es-i18n.cjs \
+                      scripts/test-linux-notch.cjs test-codex-headline.cjs
+
+      # Hyprland needs a display device to start on, and a runner has no GPU:
+      # vkms is the kernel's virtual one. It has to be loaded here, on the
+      # host, which is why the job is not simply `container: archlinux`.
+      - name: Load a virtual display device
+        run: |
+          sudo modprobe vkms || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe vkms
+          }
+          ls -l /dev/dri
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/arch-cargo/registry
+            ~/arch-cargo/git
+            windows/packaging/arch/src/target
+          key: arch-cargo-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: arch-cargo-
+
+      # makepkg refuses to run as root; the build user has the runner's id, so
+      # that it can write to the checkout.
+      - name: Start an Arch container
+        run: |
+          mkdir -p ~/arch-cargo out
+          docker run -d --name arch \
+            -v /dev/dri:/dev/dri --device-cgroup-rule 'c 226:* rwm' \
+            -v "$PWD:/repo" -v "$HOME/arch-cargo:/home/builder/.cargo" \
+            archlinux:base-devel sleep infinity
+          docker exec arch bash -ec '
+            useradd -m -u '"$(id -u)"' builder
+            echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+            chown builder /home/builder/.cargo
+            chmod a+rw /dev/dri/*
+            pacman -Syu --noconfirm --needed git namcap hyprland xorg-xwayland grim'
+
+      # check() in the PKGBUILD runs cargo test, so this is the build and the tests.
+      - name: Build the package
+        run: docker exec -u builder -w /repo/windows/packaging/arch arch makepkg --syncdeps --noconfirm
+
+      - name: Lint the package
+        run: docker exec -w /repo/windows/packaging/arch arch bash -ec 'namcap codenotch-git-*.pkg.tar.zst'
+
+      - name: Install it
+        run: |
+          docker exec -w /repo/windows/packaging/arch arch bash -ec '
+            pacman -U --noconfirm codenotch-git-*.pkg.tar.zst
+            pacman -Ql codenotch-git'
+
+      - name: Start what was installed, on Hyprland
+        run: docker exec -u builder arch /repo/windows/packaging/arch/smoke-test.sh /repo/out/smoke
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: codenotch-git-${{ github.sha }}
+          path: |
+            windows/packaging/arch/codenotch-git-*.pkg.tar.zst
+            out/smoke/screenshot.png
+            out/smoke/*.txt
+            out/smoke/*.log
+            out/smoke/codenotch.out

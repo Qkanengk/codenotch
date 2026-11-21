@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Codenotch
+Comment=Usage notch for Claude, Codex, Cursor and other coding agents
+Exec=codenotch
+Icon=codenotch
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=false

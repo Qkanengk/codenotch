@@ -917,6 +917,11 @@ const RUN_LOG_MAX_BYTES: u64 = 1024 * 1024;
 pub fn applog(line: &str) {
     use std::io::Write;
     let log = config::config_path().with_file_name("run.log");
+    // Nothing has made the folder yet on a first run, and the lines written before the first
+    // save were lost: which window the notch is, and where it was placed.
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     // Past the cap the log starts again rather than growing for as long as the app runs.
     let full = std::fs::metadata(&log).map(|m| m.len() > RUN_LOG_MAX_BYTES).unwrap_or(false);
     let opened = if full {

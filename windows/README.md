@@ -360,12 +360,47 @@ Everything else — all providers, the hover card, the settings window, the tray
 start at sign-in (an XDG autostart entry rather than a registry value) — behaves as it does
 on Windows.
 
+#### Arch and CachyOS
+
+[`packaging/arch`](packaging/arch) is a `PKGBUILD` for this checkout: it builds what is in the
+working tree, not a download, so a branch can be installed before it is merged.
+
+```sh
+sudo pacman -S --needed base-devel git
+git clone https://github.com/Qkanengk/codenotch && cd codenotch/windows/packaging/arch
+makepkg -si                 # the dependencies, the build, the tests, then pacman -U
+```
+
+That is the package `codenotch-git`: `/usr/bin/codenotch` with `codenotch-hook` beside it, where
+**Install hooks** looks for it, a launcher entry and the icons. `gtk-layer-shell` comes with it, so
+on Hyprland the notch is the layer surface described below; `xorg-xwayland` is an optional
+dependency, for the other Wayland compositors. `makepkg -si --nocheck` leaves the tests out, and
+`sudo pacman -R codenotch-git` removes it again. The settings stay in `~/.config/codenotch`.
+
+- **Version.** `<version>.r<commits>.g<commit>`, read from `Cargo.toml` and git each time. To
+  update, `git pull` and `makepkg -si` again. The check for updates in Settings looks at upstream's
+  releases, which carry no Linux build: its button opens the release page and installs nothing.
+- **Start.** From the launcher, or `codenotch`; `codenotch autostart on` for every sign-in (see
+  Hyprland below for what that writes). `codenotch doctor` works as on Windows.
+- **Qoder.** The sidecar wants its SDK beside it, in a folder of yours: with `nodejs` and `npm`
+  installed, `install -D /usr/share/codenotch/qoder-usage.cjs -t ~/.config/codenotch/qoder-sdk`,
+  then `npm install @qoder-ai/qoder-agent-sdk` in that folder.
+- **In a container.** `packaging/arch/smoke-test.sh` starts the installed app on a headless
+  Hyprland and fails unless it is listening and the notch is a layer surface; Hyprland needs a
+  display device for that, which `modprobe vkms` gives a host without a GPU. The `Arch package` workflow runs
+  `makepkg`, `namcap`, `pacman -U` and that script on `archlinux:base-devel` for every change
+  under `windows/`, and keeps the package as an artifact.
+
+The package was built, installed and started this way on Arch, in a container with software
+rendering. It has not been run on CachyOS itself, nor on an NVIDIA GPU: CachyOS's own repositories
+and kernel, and the proprietary driver under Hyprland, are untested.
+
 #### Hyprland
 
 On Hyprland the notch is a native Wayland layer surface (`wlr-layer-shell`, namespace `codenotch`,
 overlay layer): Hyprland anchors it to the screen edge itself, on every workspace, with no window
-rule, and draws it at the monitor's own scale, fractional ones included. On Arch or CachyOS the
-prerequisites are
+rule, and draws it at the monitor's own scale, fractional ones included. The package above brings what
+that needs; for a build with cargo alone, on Arch or CachyOS, the prerequisites are
 `sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3 gtk-layer-shell libayatana-appindicator librsvg openssl xorg-xwayland`.
 The binary can be started by itself, so `run-linux.sh` is only needed from a snap's shell.
 
