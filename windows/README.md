@@ -362,6 +362,39 @@ Everything else — all providers, the hover card, the settings window, the tray
 start at sign-in (an XDG autostart entry rather than a registry value) — behaves as it does
 on Windows.
 
+#### Hyprland
+
+On Hyprland the notch is still an X11 client under XWayland; a native layer surface is not there
+yet. On Arch or CachyOS the prerequisites are
+`sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg openssl xorg-xwayland`.
+The binary can be started by itself — it picks X11 and calls `XInitThreads()` before GTK starts, so
+`run-linux.sh` is only needed from a snap's shell.
+
+- **Window rule.** At launch the notch asks Hyprland, over its socket, to treat it as what it is:
+  floating, pinned to every workspace, no border, rounding, blur, shadow, dimming or animation, and
+  not focused when it opens. The rule is set again after every config reload, and matches only the
+  notch and its overlays, so Settings stays an ordinary window. This needs a Hyprland with a Lua
+  config (0.57 was the one tested); on an older one `run.log` says `window rule not applied` and the
+  rule has to be written by hand in that version's syntax.
+- **`codenotch hyprland-config`** prints the same rule and an autostart line, for a config that
+  should carry them itself.
+- **Start at sign-in.** Hyprland starts nothing from `~/.config/autostart` on its own, so turning
+  it on (Settings, or `codenotch autostart on`) also adds one line ending in
+  `-- codenotch autostart` at the top of `~/.config/hypr/hyprland.lua`, and turning it off removes that line.
+  A config that is not there is not created.
+- **Hover.** Hyprland leaves Xwayland's pointer where it was once the cursor moves on to a Wayland
+  window, so no X11 leave event arrives; while the pointer is on the notch, Hyprland is asked where
+  the cursor is, and the card closes on that. With the default `follow_mouse`, the notch is the
+  active window while the pointer is on it, as any window would be.
+- **Rendering.** With WebKitGTK 2.54 a transparent window paints nothing but the spinner when
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` is set, which is the usual advice for NVIDIA. The notch takes
+  that variable back out and uses WebKit's shared-memory path (`WEBKIT_DMABUF_RENDERER_FORCE_SHM=1`)
+  instead, and does the same whenever the NVIDIA kernel driver is loaded. Nothing forces Mesa.
+  `CODENOTCH_KEEP_WEBKIT_ENV=1` leaves the environment exactly as it was given.
+
+This was tested on Hyprland 0.57 with XWayland 24.1 and WebKitGTK 2.54 on a virtual display with
+software rendering. It has not been run on an NVIDIA GPU or on a monitor with fractional scaling.
+
 Tray menu: the readings themselves — a line per provider with its headline figure, and under it
 one line per limit window — then **Refresh all**, **Settings…** and **Quit Codenotch**. Clicking a
 provider's line re-reads that provider. Everything else is in the settings window: which rings the

@@ -1,4 +1,5 @@
 //! Native input regions avoid polling a stale global pointer under XWayland.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use gtk::{glib, prelude::*};
@@ -6,6 +7,39 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 
 const LEAVE_GRACE: Duration = Duration::from_millis(250);
 type PendingLeave = Rc<RefCell<Option<glib::SourceId>>>;
+
+const HYPRLAND_POLL: Duration = Duration::from_millis(100);
+static WATCHING: AtomicBool = AtomicBool::new(false);
+
+/// Polls of the cursor being elsewhere that add up to the grace a real leave gets.
+fn misses_for_leave() -> u32 {
+    (LEAVE_GRACE.as_millis() / HYPRLAND_POLL.as_millis()).max(1) as u32 + 1
+}
+
+/// Hyprland keeps Xwayland's pointer where it last was once the cursor moves on to a Wayland
+/// window, so no leave event comes and the card would stay open. From an enter until the cursor is
+/// off the notch, Hyprland is asked where it is instead. Does nothing on any other desktop.
+fn watch_for_leave_on_hyprland(window: &WebviewWindow) {
+    if crate::hyprland::cursor_in_notch((1.0, 1.0)).is_none() || WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let window = window.clone();
+    std::thread::spawn(move || {
+        let mut misses = 0;
+        while misses < misses_for_leave() {
+            std::thread::sleep(HYPRLAND_POLL);
+            let Ok(size) = window.outer_size() else { break };
+            let size = (size.width as f64, size.height as f64);
+            let Some((x, y)) = crate::hyprland::cursor_in_notch(size) else { break };
+            let rects = crate::HOT.lock().unwrap().clone();
+            misses = if crate::cursor_in_hot(&rects, x, y, Some(size)) { 0 } else { misses + 1 };
+        }
+        WATCHING.store(false, Ordering::SeqCst);
+        if misses >= misses_for_leave() {
+            let _ = window.eval("window.codenotchPointer(false)");
+        }
+    });
+}
 
 fn cancel_leave(pending: &PendingLeave) {
     if let Some(source) = pending.borrow_mut().take() {
@@ -40,6 +74,7 @@ pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
         if event.detail() != gtk::gdk::NotifyType::Inferior {
             cancel_leave(&enter_pending);
             let _ = enter_window.eval("window.codenotchPointer(true)");
+            watch_for_leave_on_hyprland(&enter_window);
         }
         glib::Propagation::Proceed
     });
@@ -68,4 +103,15 @@ pub fn set_hot(app: &AppHandle, rects: Vec<[f64; 4]>) {
         }
         gdk_window.input_shape_combine_region(&region, 0, 0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_leave_seen_through_hyprland_waits_at_least_the_grace() {
+        assert!(HYPRLAND_POLL * misses_for_leave() >= LEAVE_GRACE);
+        assert!(HYPRLAND_POLL * misses_for_leave() <= LEAVE_GRACE * 2);
+    }
 }

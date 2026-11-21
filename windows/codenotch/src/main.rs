@@ -48,6 +48,10 @@ mod topmost;
 mod updater;
 #[cfg(target_os = "linux")]
 mod linux_pointer;
+#[cfg(target_os = "linux")]
+mod linux_env;
+#[cfg(target_os = "linux")]
+mod hyprland;
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
@@ -356,10 +360,10 @@ pub fn place_notch(app: &AppHandle) {
         zoom_notch(&w, ms, size);
         // Position from the window's measured physical size — deriving it from the scale factor
         // pushed the window past the right edge at 125 % / 150 % (the ring's right side was clipped).
-        let (ww, wh) = w
-            .outer_size()
-            .map(|s| (s.width as i32, s.height as i32))
-            .unwrap_or((target.width as i32, target.height as i32));
+        let (ww, wh) = measured_or_target(
+            w.outer_size().ok().map(|s| (s.width, s.height)),
+            (target.width, target.height),
+        );
         let ratio = {
             let st = app.state::<AppState>();
             let c = st.cfg.lock().unwrap();
@@ -396,6 +400,14 @@ pub fn place_notch(app: &AppHandle) {
             mon.work
         ));
     }
+}
+
+/// The window's measured size, or the size just asked for when there is nothing to measure: an X11
+/// window that has not been shown yet measures 0 × 0, and placing by that put the notch's corner
+/// on the screen edge, off screen, for the compositor to pull back to wherever it saw fit.
+fn measured_or_target(measured: Option<(u32, u32)>, target: (u32, u32)) -> (i32, i32) {
+    let (w, h) = measured.filter(|(w, h)| *w > 0 && *h > 0).unwrap_or(target);
+    (w as i32, h as i32)
 }
 
 /// Bumped by every placement and every glide, so a glide still under way stops rather than carry
@@ -899,12 +911,10 @@ fn report_dpr(app: AppHandle, dpr: f64, w: f64, h: f64, settled: Option<bool>) {
 /// Slack around every hot rectangle: this is sampled on a timer, so a cursor arriving at the pill
 /// has to count as arrived slightly early, or a quick click lands between two polls while the
 /// window is still click-through and goes to whatever is behind it.
-#[cfg(any(test, not(target_os = "linux")))]
 const HOT_PAD: f64 = 10.0;
 
 /// Is the cursor on something the window is there for? `window` is the outer size in physical
 /// pixels, or None when it could not be read.
-#[cfg(any(test, not(target_os = "linux")))]
 fn cursor_in_hot(rects: &[[f64; 4]], lx: f64, ly: f64, window: Option<(f64, f64)>) -> bool {
     if rects.is_empty() {
         return false;
@@ -2193,7 +2203,14 @@ fn adopt_system_proxy() {
     }
 }
 
+/// `--silent` is what start at sign-in passes: start, or stay, in the background.
+fn is_silent_launch(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--silent")
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    linux_env::prepare();
     #[cfg(windows)]
     adopt_system_proxy();
     let args: Vec<String> = std::env::args().collect();
@@ -2223,6 +2240,14 @@ fn main() {
                 report(r);
                 return;
             }
+            #[cfg(target_os = "linux")]
+            "hyprland-config" => {
+                match std::env::current_exe() {
+                    Ok(exe) => print!("{}", hyprland::config_snippet(&exe)),
+                    Err(e) => println!("FAILED: {e}"),
+                }
+                return;
+            }
             "doctor" => {
                 let out = if args.get(2).map(|s| s.as_str()) == Some("deep") { diag::run() } else { doctor::run() };
                 println!("{out}");
@@ -2240,9 +2265,18 @@ fn main() {
     let cfg = config::load();
     let port = cfg.port;
 
+    #[cfg(target_os = "linux")]
+    hyprland::start();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Start at sign-in can fire twice on Linux (the desktop entry and the compositor's own
+            // autostart); the second one is not somebody asking for Settings.
+            if is_silent_launch(&args) {
+                applog("single instance: a second silent launch was ignored");
+                return;
+            }
             // Opening Codenotch again while it runs brings Settings forward, as on the Mac: with the
             // tray icon hidden it is the way back. Logged too, for a rebuild that was not picked up.
             applog(&format!("single instance: another launch was refused; the running instance is build={BUILD} — quit it from the tray first if you just rebuilt"));
@@ -2397,7 +2431,11 @@ fn main() {
             apply_theme(&handle);
             if let Some(w) = handle.get_webview_window("notch") {
                 #[cfg(target_os = "linux")]
-                linux_pointer::install(&w)?;
+                {
+                    // Before it is shown: Hyprland matches its window rule on the title when the window maps
+                    let _ = w.set_title(hyprland::NOTCH_TITLE);
+                    linux_pointer::install(&w)?;
+                }
                 let _ = w.show();
             }
             tray::setup(&handle)?;
@@ -2472,8 +2510,27 @@ fn main() {
 mod tests {
     use super::{
         antigravity_composite_fraction, cursor_in_hot, glide_curve, notch_window_size, provider_page, ring_window,
-        work_insets, Screen, HOT_PAD, NOTCH_W, TRAY_PROVIDER_IDS,
+        edge_origin, is_silent_launch, measured_or_target, work_insets, Screen, HOT_PAD, NOTCH_W, TRAY_PROVIDER_IDS,
     };
+
+    #[test]
+    fn an_unmeasured_window_is_placed_by_the_size_it_was_given() {
+        assert_eq!(measured_or_target(Some((450, 812)), (360, 650)), (450, 812));
+        assert_eq!(measured_or_target(Some((0, 0)), (360, 650)), (360, 650));
+        assert_eq!(measured_or_target(None, (360, 650)), (360, 650));
+        // The right edge of a 1920 × 1080 screen: a 0 × 0 window used to land at x = 1920.
+        let screen = Screen { name: None, x: 0, y: 0, w: 1920, h: 1080, scale: 1.0, work: (0, 0, 1920, 1080) };
+        let (w, h) = measured_or_target(Some((0, 0)), (360, 650));
+        assert_eq!(edge_origin(&screen, "right", w, h, 0.5), (1560, 215));
+    }
+
+    #[test]
+    fn only_a_silent_launch_stays_out_of_settings() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert!(is_silent_launch(&args(&["/usr/bin/codenotch", "--silent"])));
+        assert!(!is_silent_launch(&args(&["/usr/bin/codenotch"])));
+        assert!(!is_silent_launch(&args(&["--silent"])), "the first argument is the program");
+    }
     use crate::usage::LimitWindow;
 
     /// A provider added without a page of its own used to fall through to Claude's

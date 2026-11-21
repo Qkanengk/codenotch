@@ -277,7 +277,7 @@
           <div class="item cap">Codenotch opens by itself every time you sign in to this computer, and waits quietly in the background until a coding session starts. Turn it off and you have to open Codenotch yourself.</div>
           <div class="item"><span>Version</span><span class="value" id="about-version" data-dynamic>0.3.0</span></div>
           <div class="item"><span>Updates</span><span class="value" id="update-status" data-dynamic></span><button class="btn" id="btn-update" data-dynamic>Check for updates</button></div>
-          <div class="item cap">Codenotch checks for new Windows releases shortly after it starts. Signed updates install here; otherwise download and run the official installer from GitHub.</div>
+          <div class="item cap" id="cap-update">Codenotch checks for new Windows releases shortly after it starts. Signed updates install here; otherwise download and run the official installer from GitHub.</div>
         </div>
         <div class="sec">Notifications</div>
         <div class="group">
@@ -1216,6 +1216,21 @@ const CLAUDE_ROW_COPY = {
 const CLAUDE_ROW_KEYS = ['Sign in', 'Add…', 'Add a Claude account', 'Each account signs in with Claude Code in a folder of its own and gets its own ring. Switching one off stops reading it and keeps its sign-in.', 'Finish signing in in the browser or terminal window.', 'Install the standalone Claude Code CLI to add or sign in to an account.', 'Sign-in was cancelled, did not finish or timed out. Try again.', 'The account was not added: its sign-in did not finish.'];
 for(const [lang, values] of Object.entries(CLAUDE_ROW_COPY)){
   CLAUDE_ROW_KEYS.forEach((key, index) => { STATIC_TEXT[lang][key] = values[index]; });
+}
+// What the update row says on Linux, where no release carries an installer.
+const LINUX_UPDATE_KEYS = ['Codenotch checks for new releases shortly after it starts. There is no Linux installer yet: the release page on GitHub has the source to build.', 'Open release page'];
+const LINUX_UPDATE_COPY = {
+  'pt-BR':['O Codenotch procura novas versões pouco depois de iniciar. Ainda não há instalador para Linux: a página da versão no GitHub tem o código-fonte para compilar.','Abrir página da versão'],
+  ru:['Codenotch проверяет новые версии вскоре после запуска. Установщика для Linux пока нет: на странице релиза в GitHub есть исходный код для сборки.','Открыть страницу релиза'],
+  zh:['Codenotch 启动后会检查新版本。目前还没有 Linux 安装程序：GitHub 的发布页面提供可供构建的源代码。','打开发布页面'],
+  'zh-Hant':['Codenotch 啟動後會檢查新版本。目前還沒有 Linux 安裝程式：GitHub 的發行頁面提供可供建置的原始碼。','開啟發行頁面'],
+  ja:['Codenotch は起動後まもなく新しいバージョンを確認します。Linux 用のインストーラーはまだありません。GitHub のリリースページにビルド用のソースコードがあります。','リリースページを開く'],
+  ko:['Codenotch는 시작 직후 새 버전을 확인해요. 아직 Linux용 설치 프로그램은 없어요. GitHub 릴리스 페이지에 빌드할 소스 코드가 있어요.','릴리스 페이지 열기'],
+  uk:['Codenotch перевіряє нові версії невдовзі після запуску. Інсталятора для Linux поки немає: на сторінці релізу в GitHub є вихідний код для збирання.','Відкрити сторінку релізу'],
+  es:['Codenotch busca nuevas versiones poco después de abrirse. Todavía no hay instalador para Linux: la página de la versión en GitHub tiene el código fuente para compilar.','Abrir página de la versión']
+};
+for(const [lang, values] of Object.entries(LINUX_UPDATE_COPY)){
+  LINUX_UPDATE_KEYS.forEach((key, index) => { STATIC_TEXT[lang][key] = values[index]; });
 }
 const RESET_COPY = {
   'pt-BR':['Notificações de reset','Mostrar um cartão quando o Claude, Codex, Cursor ou outro provedor ativo renovar uma janela após pelo menos 10% de uso. O cartão também aparece com a notch oculta.','Som de notificação','Prévia do cartão de reset','Ver prévia','Notificações'],
@@ -2261,6 +2276,10 @@ document.getElementById('author').addEventListener('click', () => {
    was asked for rather than interrupting anything. */
 const updBtn = document.getElementById('btn-update');
 const updStatus = document.getElementById('update-status');
+/* No release carries a Linux installer, so there the row neither names Windows nor offers one. */
+const updOnLinux = typeof navigator !== 'undefined' && /Linux/.test(navigator.platform);
+const updManual = updOnLinux ? 'Open release page' : 'Download installer';
+if(updOnLinux) document.getElementById('cap-update').textContent = LINUX_UPDATE_KEYS[0];
 /* The state arrives before the language does, so the row keeps it and is drawn again by renderAll */
 let updState = null;
 let updateEventSeen = false;
@@ -2272,7 +2291,7 @@ function renderUpdate(st){
   if(st.checking){ updStatus.textContent = ui('Checking…', 'Checking…'); updBtn.textContent = ui('Check for updates', 'Check for updates'); return; }
   if(st.available){
     updStatus.textContent = st.message ? ui(st.message, st.message) : st.available;
-    updBtn.textContent = st.can_install ? ui('Update', 'Update') : ui('Download installer', 'Download installer');
+    updBtn.textContent = st.can_install ? ui('Update', 'Update') : ui(updManual, updManual);
     return;
   }
   updStatus.textContent = st.message ? ui(st.message, st.message)
