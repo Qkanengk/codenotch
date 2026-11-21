@@ -380,7 +380,7 @@ The binary can be started by itself — it picks X11 and calls `XInitThreads()` 
   should carry them itself.
 - **Start at sign-in.** Hyprland starts nothing from `~/.config/autostart` on its own, so turning
   it on (Settings, or `codenotch autostart on`) also adds one line ending in
-  `-- codenotch autostart` to `~/.config/hypr/hyprland.lua`, and turning it off removes that line.
+  `-- codenotch autostart` at the top of `~/.config/hypr/hyprland.lua`, and turning it off removes that line.
   A config that is not there is not created.
 - **Hover.** Hyprland leaves Xwayland's pointer where it was once the cursor moves on to a Wayland
   window, so no X11 leave event arrives; while the pointer is on the notch, Hyprland is asked where

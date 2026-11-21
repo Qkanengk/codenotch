@@ -127,11 +127,9 @@ fn without_autostart(config: &str) -> String {
     config.lines().filter(|line| !line.trim_end().ends_with(AUTOSTART_MARK)).map(|line| format!("{line}\n")).collect()
 }
 
+/// First in the file: a config may end in a top-level `return`, and Lua takes nothing after one.
 fn with_autostart(config: &str, exe: &Path) -> String {
-    let mut out = without_autostart(config);
-    out.push_str(&autostart_line(exe));
-    out.push('\n');
-    out
+    format!("{}\n{}", autostart_line(exe), without_autostart(config))
 }
 
 fn config_file() -> Option<PathBuf> {
@@ -282,12 +280,14 @@ mod tests {
         let config = "local terminal = \"foot\"\nhl.bind(\"SUPER + Q\", hl.dsp.exec_cmd(terminal))";
         let exe = Path::new("/usr/bin/codenotch");
         let on = with_autostart(config, exe);
-        assert_eq!(on, format!("{config}\n{}\n", autostart_line(exe)));
+        assert_eq!(on, format!("{}\n{config}\n", autostart_line(exe)));
         assert_eq!(with_autostart(&on, exe), on, "enabling twice adds nothing");
         let moved = with_autostart(&on, Path::new("/home/k/codenotch"));
         assert_eq!(moved.matches(AUTOSTART_MARK).count(), 1, "a moved binary replaces the line");
         assert!(moved.contains("/home/k/codenotch"));
         assert_eq!(without_autostart(&on), format!("{config}\n"));
+        let returning = with_autostart("local M = {}\nreturn M\n", exe);
+        assert!(returning.ends_with("return M\n"), "nothing may follow a top-level return");
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         assert!(!path.exists());
         std::fs::write(&path, "-- mine\n").unwrap();
         assert_eq!(rewrite(&path, |c| with_autostart(c, exe)), Ok(true));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("-- mine\n{}\n", autostart_line(exe)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{}\n-- mine\n", autostart_line(exe)));
         assert_eq!(rewrite(&path, without_autostart), Ok(true));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "-- mine\n");
         let _ = std::fs::remove_dir_all(dir);
